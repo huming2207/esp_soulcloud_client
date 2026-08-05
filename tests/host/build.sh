@@ -8,7 +8,7 @@ ROOT="$(cd "$DIR/../.." && pwd)"
 MPACK="$ROOT/external/mpack/src/mpack"
 OUT="$DIR/out"
 
-CFLAGS="-I$ROOT/src -I$MPACK -DMPACK_HAS_CONFIG=1 -Wall -Wextra -O2 -g"
+CFLAGS="-I$ROOT/include -I$ROOT/src -I$MPACK -DMPACK_HAS_CONFIG=1 -Wall -Wextra -O2 -g"
 CXXFLAGS="$CFLAGS -std=c++17"
 
 mkdir -p "$OUT"
