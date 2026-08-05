@@ -1,0 +1,3 @@
+[submodule "external/mpack"]
+	path = external/mpack
+	url = https://github.com/ludocode/mpack.git

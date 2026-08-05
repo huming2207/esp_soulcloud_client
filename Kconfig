@@ -1,0 +1,91 @@
+menu "Soulcloud client"
+
+    config SOULCLOUD_DEVICE_UID
+        string "Device UID (MQTT username + client ID)"
+        default "esp32-demo-0001"
+        help
+            Hardware-facing identifier. Must be unique platform-wide and
+            contain no '/', '+', '#' or whitespace.
+
+    config SOULCLOUD_DEVICE_PASSWORD
+        string "Device MQTT password"
+        default ""
+        help
+            Credential issued by POST /v1/devices/:id/credentials.
+            Stored in NVS (plaintext; flash encryption is a production
+            concern). Empty = unconfigured; the device will not connect.
+
+    config SOULCLOUD_SERIAL
+        string "Device serial (stat.sn)"
+        default ""
+        help
+            Empty = derive from the WiFi station MAC (12 hex chars).
+
+    config SOULCLOUD_BROKER_URI
+        string "MQTT broker URI"
+        default "ws://192.168.1.100:1883/mqtt"
+        help
+            MQTT over WebSocket endpoint. Use wss:// for TLS.
+
+    config SOULCLOUD_API_BASE_URL
+        string "Soulcloud API base URL"
+        default "http://192.168.1.100:8080"
+        help
+            Prefix prepended to the relative OTA download url from the
+            ota notice. Use https:// for TLS.
+
+    config SOULCLOUD_STAT_INTERVAL_S
+        int "Stat report interval (seconds)"
+        default 120
+        range 10 86400
+
+    config SOULCLOUD_LOG_RATE_PER_S
+        int "Log uplink rate limit (messages per second)"
+        default 10
+        range 1 20
+        help
+            Server-side uplink guard allows 20/s with burst 100; the device
+            throttles below that and emits DROPPED packets on overflow.
+
+    config SOULCLOUD_LOG_QUEUE_LEN
+        int "Log TX queue length (packets)"
+        default 32
+        range 4 256
+
+    config SOULCLOUD_MQTT_BUFFER_IN
+        int "MQTT input buffer size (bytes)"
+        default 4096
+        range 1024 65536
+        help
+            esp-mqtt receive buffer; must fit the largest downlink packet.
+
+    config SOULCLOUD_MQTT_BUFFER_OUT
+        int "MQTT output buffer size (bytes)"
+        default 8192
+        range 1024 65536
+        help
+            esp-mqtt send buffer; must fit the largest on9log packet.
+
+    config SOULCLOUD_MQTT_KEEPALIVE_S
+        int "MQTT keepalive (seconds)"
+        default 60
+        range 10 3600
+
+    config SOULCLOUD_MQTT_RECONNECT_TIMEOUT_MS
+        int "MQTT auto-reconnect interval (ms)"
+        default 10000
+        range 1000 300000
+
+    config SOULCLOUD_OTA_MAX_BYTES
+        int "OTA maximum image size (bytes)"
+        default 4194304
+        range 65536 8388608
+        help
+            Refuse OTA notices whose bin_size exceeds this (partition guard).
+
+    config SOULCLOUD_OTA_TIMEOUT_S
+        int "OTA download watchdog (seconds)"
+        default 120
+        range 10 3600
+
+endmenu

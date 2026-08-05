@@ -1,0 +1,5 @@
+version: "1.0.0"
+description: "Soulcloud IoT device client for ESP32"
+dependencies:
+  idf: ">=6.0"
+  espressif/mqtt: "^1.1.0"
