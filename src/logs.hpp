@@ -20,6 +20,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <on9log.h>
 
 #include "soulcloud.hpp"
 
@@ -55,6 +56,9 @@ namespace soulcloud
         mqtt_bridge *bridge_ = nullptr;
         SemaphoreHandle_t sink_mutex_ = nullptr;
         StaticSemaphore_t sink_mutex_storage_ = {};
+        // Long-lived sink descriptor handed to on9log (the core keeps the
+        // pointer, not a copy).
+        on9log_sink_t sink_ = {};
 
         uint8_t packet_[PACKET_MAX];
         size_t packet_len_ = 0;

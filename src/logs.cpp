@@ -33,7 +33,12 @@ esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
         .payload_cb = sink_payload,
         .end_cb = sink_end,
     };
-    if (on9log_add_sink(&sink, this) != ON9LOG_OK) {
+    // on9log stores the sink descriptor POINTER in its global table (no
+    // copy), so it must outlive the add call — keep it as a member of the
+    // singleton instead of a stack temporary (dangling pointer -> garbage
+    // callback -> crash on first log packet).
+    sink_ = sink;
+    if (on9log_add_sink(&sink_, this) != ON9LOG_OK) {
         sink_mutex_ = nullptr;
         return ESP_FAIL;
     }
@@ -51,7 +56,8 @@ void soulcloud::log_sender::deinit()
         .payload_cb = sink_payload,
         .end_cb = sink_end,
     };
-    on9log_remove_sink(&sink, this);
+    sink_ = sink;
+    on9log_remove_sink(&sink_, this);
     sink_mutex_ = nullptr;
     cfg_ = nullptr;
     bridge_ = nullptr;
