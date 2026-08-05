@@ -17,62 +17,89 @@ namespace soulcloud
     // command arguments
     // ------------------------------------------------------------------ //
 
-    /** One argument value. Strings/bins point into the payload. */
+    /**
+     * @brief One decoded command argument value.
+     *
+     * Strings and bins are zero-copy views into the MQTT payload: the
+     * pointer members are valid only while the payload buffer lives
+     * (i.e. for the duration of the command handler call).
+     */
     struct cmd_arg_value
     {
+        /**
+         * @brief Discriminator selecting the active union member.
+         */
         enum type_t : uint8_t {
-            TYPE_NIL = 0,
-            TYPE_BOOL = 1,
-            TYPE_INT = 2,
-            TYPE_UINT = 3,
-            TYPE_FLOAT = 4,
-            TYPE_STR = 5,
-            TYPE_BIN = 6,
+            TYPE_NIL = 0,    /**< MessagePack nil */
+            TYPE_BOOL = 1,   /**< MessagePack bool */
+            TYPE_INT = 2,    /**< signed integer (fits int64) */
+            TYPE_UINT = 3,   /**< unsigned integer (fits uint64) */
+            TYPE_FLOAT = 4,  /**< float32 or float64 */
+            TYPE_STR = 5,    /**< string view (str) */
+            TYPE_BIN = 6,    /**< binary view (bin) */
         };
-        type_t type;
+
+        type_t type;  /**< Active union member. */
+
         union {
-            bool b;
-            int64_t i;
-            uint64_t u;
-            double f;
-            struct {
-                const char *ptr;
-                uint32_t len;
-            } str;
-            struct {
-                const uint8_t *ptr;
-                uint32_t len;
-            } bin;
+            bool b;                        /**< Valid when type == TYPE_BOOL. */
+            int64_t i;                     /**< Valid when type == TYPE_INT. */
+            uint64_t u;                    /**< Valid when type == TYPE_UINT. */
+            double f;                      /**< Valid when type == TYPE_FLOAT. */
+            struct
+            {
+                const char *ptr;           /**< In-place pointer into the payload. */
+                uint32_t len;              /**< String length in bytes (not NUL-terminated). */
+            } str;                         /**< Valid when type == TYPE_STR. */
+            struct
+            {
+                const uint8_t *ptr;        /**< In-place pointer into the payload. */
+                uint32_t len;              /**< Binary length in bytes. */
+            } bin;                         /**< Valid when type == TYPE_BIN. */
         };
     };
 
-    /** One named command argument (map with exactly one key). */
+    /**
+     * @brief One named command argument.
+     *
+     * The wire format is a map with exactly one key: `{key: value}`.
+     */
     struct cmd_arg
     {
-        const char *key;  // NUL-terminated, valid while the payload lives
-        uint32_t key_len;
-        cmd_arg_value value;
+        const char *key;  /**< NUL-terminated key copy; valid while the payload lives. */
+        uint32_t key_len; /**< Key length in bytes (strlen(key)). */
+        cmd_arg_value value; /**< Parsed argument value (zero-copy). */
     };
 
-    /** A decoded command execution. All pointers reference the payload. */
+    /**
+     * @brief A decoded `cmd/exec` message.
+     *
+     * All pointers reference the payload (or the internal key_storage)
+     * and are valid only for the duration of the dispatch call.
+     */
     struct command_exec
     {
-        const uint8_t *id;  // exactly 16 raw bytes
-        uint64_t seq;
-        const char *cmd;  // NUL-terminated copy is not made; use cmd_len
-        uint32_t cmd_len;
-        cmd_arg args[8];  // up to 8 arguments
-        uint32_t arg_count;
-        char key_storage[8][40];  // NUL-terminated copies of arg keys
+        const uint8_t *id;  /**< Command UUID, exactly 16 raw bytes. */
+        uint64_t seq;       /**< Per-device monotonic sequence; echo verbatim. */
+        const char *cmd;    /**< Command name; NOT NUL-terminated, use cmd_len. */
+        uint32_t cmd_len;   /**< Command name length in bytes. */
+        cmd_arg args[8];    /**< Up to 8 arguments (wire limit). */
+        uint32_t arg_count; /**< Number of valid entries in args[]. */
+        char key_storage[8][40]; /**< NUL-terminated copies of the argument keys. */
     };
 
-    /** A command result to be encoded; payload args are optional. */
+    /**
+     * @brief A command result to be encoded into `cmd/result`.
+     *
+     * The dispatcher fills id/seq; the handler fills code and may attach
+     * an args payload (optional).
+     */
     struct command_result
     {
-        const uint8_t *id;  // 16 raw bytes
-        uint64_t seq;
-        int32_t code;
-        const cmd_arg *args;  // optional
-        uint32_t arg_count;
+        const uint8_t *id;   /**< Command UUID, 16 raw bytes. */
+        uint64_t seq;        /**< Echo of the received seq. */
+        int32_t code;        /**< 0 = ok, negative = error (backend contract). */
+        const cmd_arg *args; /**< Optional result payload; NULL when absent. */
+        uint32_t arg_count;  /**< Number of entries in args[]. */
     };
 }  // namespace soulcloud

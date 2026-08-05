@@ -18,35 +18,85 @@
 
 namespace soulcloud
 {
+    /**
+     * @brief Event callbacks forwarded from the esp-mqtt event loop.
+     *
+     * All callbacks run on the esp-mqtt task and must be quick; the
+     * payload/topic pointers are valid only for the duration of the call.
+     */
     struct mqtt_callbacks
     {
-        void (*on_connected)(void *ctx);
-        void (*on_disconnected)(void *ctx);
+        void (*on_connected)(void *ctx);   /**< MQTT session established. */
+        void (*on_disconnected)(void *ctx); /**< MQTT session dropped. */
         void (*on_data)(void *ctx, const char *topic, size_t topic_len,
-                        const uint8_t *data, size_t data_len);
-        void (*on_error)(void *ctx, esp_mqtt_error_codes_t *err);
-        void *ctx;
+                        const uint8_t *data, size_t data_len); /**< Inbound PUBLISH. */
+        void (*on_error)(void *ctx, esp_mqtt_error_codes_t *err); /**< Transport error (may be NULL). */
+        void *ctx; /**< Opaque context passed to every callback. */
     };
 
+    /**
+     * @brief Thin wrapper over esp_mqtt_client.
+     *
+     * Configures the client from soulcloud::config, registers one event
+     * handler and forwards events through mqtt_callbacks. Publish and
+     * subscribe are thread-safe (esp-mqtt queues internally).
+     */
     class mqtt_bridge
     {
     public:
+        /**
+         * @brief Configure and register the esp-mqtt client.
+         *
+         * @param[in] cfg Configuration (borrowed for the call only; the
+         *                relevant fields are copied into the client
+         *                config).
+         * @param[in] cbs Callbacks (borrowed; the struct itself is
+         *                copied, the function pointers must stay valid).
+         * @return ESP_OK, or ESP_ERR_NO_MEM if esp_mqtt_client_init failed.
+         */
         esp_err_t init(const config *cfg, const mqtt_callbacks *cbs);
+
+        /** @brief Destroys the esp-mqtt client (idempotent). */
         void deinit();
 
+        /**
+         * @brief Start the client (connects; auto-reconnect enabled).
+         * @return ESP_OK or an esp-mqtt error.
+         */
         esp_err_t start();
+
+        /** @brief Stop the client (disconnects). */
         esp_err_t stop();
 
+        /** @return true while the MQTT session is established. */
         bool is_connected() const { return connected_; }
 
-        /** Subscribes at QoS (must be called from an event callback or
-         *  after start; esp-mqtt queues it otherwise). */
+        /**
+         * @brief Subscribe to a topic at the given QoS.
+         *
+         * May be called from an event callback or any task; esp-mqtt
+         * queues the subscription if the session is not ready.
+         *
+         * @return Message id, or a negative error.
+         */
         int32_t subscribe(const char *topic, int qos);
 
-        /** Publishes; returns the message id or a negative error. */
+        /**
+         * @brief Publish a payload to a topic.
+         *
+         * Thread-safe; returns the message id or a negative error (the
+         * payload is copied by esp-mqtt before returning).
+         *
+         * @return Message id, or a negative error.
+         */
         int32_t publish(const char *topic, const uint8_t *data, size_t len, int qos);
 
-        /** Forces an immediate reconnect attempt (e.g. WiFi back up). */
+        /**
+         * @brief Force an immediate reconnect attempt.
+         *
+         * Call when the network interface (re)connects so the client
+         * does not wait for the esp-mqtt reconnect timer.
+         */
         void notify_wifi_connected();
 
     private:

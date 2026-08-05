@@ -51,9 +51,15 @@ esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
 
 void soulcloud::log_sender::deinit()
 {
-    if (sink_mutex_ == nullptr) {
+    SemaphoreHandle_t mtx = sink_mutex_;
+    if (mtx == nullptr) {
         return;
     }
+    // Drain any in-flight sink callbacks before removing the sink: a
+    // callback may hold the mutex mid-packet, and remove_sink would wait
+    // for its reader slot. Taking the mutex first makes the teardown
+    // deterministic (callbacks never wait on deinit).
+    xSemaphoreTake(mtx, portMAX_DELAY);
     const on9log_sink_t sink = {
         .start_cb = sink_start,
         .payload_cb = sink_payload,
@@ -65,6 +71,7 @@ void soulcloud::log_sender::deinit()
     cfg_ = nullptr;
     bridge_ = nullptr;
     packet_active_ = false;
+    xSemaphoreGive(mtx);
 }
 
 void soulcloud::log_sender::sink_start(const uint8_t *header, size_t header_len, void *ctx)
@@ -108,7 +115,11 @@ void soulcloud::log_sender::sink_payload(const uint8_t *payload, size_t payload_
 void soulcloud::log_sender::sink_end(void *ctx)
 {
     log_sender *self = static_cast<log_sender *>(ctx);
-    if (!self->packet_active_) {
+    // Defensive NULL check: deinit() drains the mutex before clearing
+    // sink_mutex_, so a live callback can only hold the old snapshot if
+    // teardown races it; skip the packet in that case instead of
+    // xSemaphoreGive(NULL).
+    if (self->sink_mutex_ == nullptr || !self->packet_active_) {
         return;
     }
     self->packet_active_ = false;

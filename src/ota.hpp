@@ -26,9 +26,21 @@ namespace soulcloud
     class mqtt_bridge;
     class ota_notice;
 
+    /**
+     * @brief OTA executor (singleton).
+     *
+     * One OTA flow at a time: start() copies the notice into internal
+     * storage and spawns a dedicated task that downloads, verifies,
+     * flashes and restarts. Commands are ignored while active
+     * (soulcloud_client checks is_active()).
+     */
     class ota_executor
     {
     public:
+        /**
+         * @brief Access the singleton instance.
+         * @return Reference to the process-wide executor.
+         */
         static ota_executor &instance()
         {
             static ota_executor s_instance;
@@ -38,13 +50,37 @@ namespace soulcloud
         ota_executor(const ota_executor &) = delete;
         ota_executor &operator=(const ota_executor &) = delete;
 
+        /**
+         * @brief Configure the executor.
+         *
+         * @param[in] cfg    Configuration (BORROWED: must outlive the
+         *                   executor — the client passes its own copy).
+         * @param[in] bridge MQTT bridge (borrowed, must outlive the
+         *                   executor; used for ota/result reports).
+         * @return ESP_OK, or ESP_ERR_INVALID_STATE if already init'd.
+         */
         esp_err_t init(const config *cfg, mqtt_bridge *bridge);
+
+        /** @brief Forget cfg/bridge (idempotent). */
         void deinit();
 
-        /** True while an OTA download/flash is in progress. */
+        /** @brief True while an OTA download/flash is in progress. */
         bool is_active() const { return active_; }
 
-        /** Starts the OTA flow for a validated notice (copied). */
+        /**
+         * @brief Start the OTA flow for a validated notice.
+         *
+         * Copies the notice and spawns the OTA task. Refuses to start
+         * while another OTA is active, and ignores notices for a release
+         * that is already running (NVS dedupe).
+         *
+         * @param[in] notice Decoded OTA notice.
+         * @return
+         *  - ESP_OK
+         *  - ESP_ERR_INVALID_STATE if not init'd or already active
+         *  - ESP_ERR_INVALID_SIZE   if bin_size exceeds cfg->ota_max_bytes
+         *  - ESP_ERR_NO_MEM         if the task could not be created
+         */
         esp_err_t start(const ota_notice *notice);
 
     private:

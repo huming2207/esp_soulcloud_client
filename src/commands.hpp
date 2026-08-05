@@ -15,9 +15,25 @@
 
 namespace soulcloud
 {
+    /**
+     * @brief Command registry (singleton).
+     *
+     * Maps command names to handlers and dispatches decoded `cmd/exec`
+     * payloads. A ring cache of the last RECENT_CACHE command ids
+     * suppresses re-execution of QoS1 redeliveries: a cached id is
+     * answered with the stored result code instead of running the
+     * handler again.
+     *
+     * @note dispatch() runs on the MQTT event task; handlers must be
+     *       quick and non-blocking.
+     */
     class command_registry
     {
     public:
+        /**
+         * @brief Access the singleton instance.
+         * @return Reference to the process-wide registry.
+         */
         static command_registry &instance()
         {
             static command_registry s_instance;
@@ -27,15 +43,35 @@ namespace soulcloud
         command_registry(const command_registry &) = delete;
         command_registry &operator=(const command_registry &) = delete;
 
-        /** Registers a command name (up to 16). Duplicate names replaced. */
+        /**
+         * @brief Register a command name (up to MAX_COMMANDS).
+         *
+         * Duplicate names are replaced.
+         *
+         * @param[in] name    Command name; the registry keeps the POINTER,
+         *                    so it must be static or outlive the registry.
+         * @param[in] handler Handler invoked for this command.
+         * @return
+         *  - ESP_OK
+         *  - ESP_ERR_INVALID_ARG if name/handler is NULL or name empty
+         *  - ESP_ERR_NO_MEM      if the registry is full
+         */
         esp_err_t register_command(const char *name, command_handler_t handler);
 
         /**
-         * Decodes a cmd/exec payload, dispatches to the registered handler
-         * and encodes the terminal result into out_buf.
+         * @brief Decode a `cmd/exec` payload, dispatch to the handler and
+         *        encode the terminal result into out_buf.
          *
-         * @returns the encoded result length (>0) or a negative protocol
-         *          error / ESP error.
+         * Unknown commands answer with code -1; handler failures map to
+         * code -2. QoS1 redeliveries are answered from the recent-id
+         * cache.
+         *
+         * @param[in]  payload Decoded payload bytes (borrowed).
+         * @param[in]  len     Payload length.
+         * @param[out] out_buf Result buffer.
+         * @param[in]  out_cap Result buffer capacity.
+         * @return The encoded result length (> 0), or a negative
+         *         protocol_err / ESP error.
          */
         int32_t dispatch(const uint8_t *payload, size_t len,
                          uint8_t *out_buf, size_t out_cap);
@@ -53,8 +89,8 @@ namespace soulcloud
 
         struct recent_entry
         {
-            uint8_t id[16];
-            int32_t code;  // result code sent for this id
+            uint8_t id[16];  // command UUID
+            int32_t code;    // result code sent for this id
             bool valid;
         };
 
