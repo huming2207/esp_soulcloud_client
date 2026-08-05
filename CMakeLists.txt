@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS
+        "src/protocol.cpp"
         "external/mpack/src/mpack/mpack-common.c"
         "external/mpack/src/mpack/mpack-expect.c"
         "external/mpack/src/mpack/mpack-platform.c"
