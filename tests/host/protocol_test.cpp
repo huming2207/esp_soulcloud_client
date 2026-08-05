@@ -167,7 +167,8 @@ static void test_encode_stat()
     CHECK(rd.read_key(key, sizeof(key), &key_len) == ERR_OK && strcmp(key, "up") == 0, "field up");
     CHECK(rd.expect_u64() == 42, "up value");
     CHECK(rd.read_key(key, sizeof(key), &key_len) == ERR_OK && strcmp(key, "rst") == 0, "field rst");
-    CHECK(rd.read_str(&s, &pl, 32) == ERR_OK && strcmp(s, "POWERON") == 0, "rst value");
+    // read_str is in-place (no NUL terminator): compare by length, not strcmp
+    CHECK(rd.read_str(&s, &pl, 32) == ERR_OK && pl == 7 && memcmp(s, "POWERON", 7) == 0, "rst value");
     CHECK(rd.finish() == ERR_OK, "stat parse complete");
 }
 

@@ -63,11 +63,6 @@ esp_err_t soulcloud::config_store::load(config *out)
     }
 
     const config defaults = {
-        .device_uid = CONFIG_SOULCLOUD_DEVICE_UID,
-        .device_password = CONFIG_SOULCLOUD_DEVICE_PASSWORD,
-        .serial = "",
-        .broker_uri = CONFIG_SOULCLOUD_BROKER_URI,
-        .api_base_url = CONFIG_SOULCLOUD_API_BASE_URL,
         .stat_interval_s = CONFIG_SOULCLOUD_STAT_INTERVAL_S,
         .log_rate_per_s = CONFIG_SOULCLOUD_LOG_RATE_PER_S,
         .log_queue_len = CONFIG_SOULCLOUD_LOG_QUEUE_LEN,
@@ -77,6 +72,11 @@ esp_err_t soulcloud::config_store::load(config *out)
         .mqtt_reconnect_timeout_ms = CONFIG_SOULCLOUD_MQTT_RECONNECT_TIMEOUT_MS,
         .ota_max_bytes = CONFIG_SOULCLOUD_OTA_MAX_BYTES,
         .ota_timeout_s = CONFIG_SOULCLOUD_OTA_TIMEOUT_S,
+        .device_uid = CONFIG_SOULCLOUD_DEVICE_UID,
+        .device_password = CONFIG_SOULCLOUD_DEVICE_PASSWORD,
+        .serial = "",
+        .broker_uri = CONFIG_SOULCLOUD_BROKER_URI,
+        .api_base_url = CONFIG_SOULCLOUD_API_BASE_URL,
     };
 
     *out = defaults;

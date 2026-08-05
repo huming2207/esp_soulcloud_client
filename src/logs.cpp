@@ -17,6 +17,9 @@ using namespace soulcloud;
 
 esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
 {
+    // The caller's config pointer is borrowed for the lifetime of this
+    // singleton (soulcloud_client::init passes &cfg_, its own copy, which
+    // outlives the sink — see soulcloud.cpp).
     if (sink_mutex_ != nullptr) {
         return ESP_ERR_INVALID_STATE;
     }

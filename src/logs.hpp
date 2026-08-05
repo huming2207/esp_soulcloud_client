@@ -8,6 +8,18 @@
  * QoS 0, throttled to the configured rate. Packets over the rate limit
  * are dropped silently (on9log core tracks its own overflow separately).
  *
+ * Design notes:
+ *  - Synchronous pass-through: sink callbacks run on the calling task of
+ *    the log source (task-context ON9_LOGx, or the ISR drain task for
+ *    ON9_ISR_LOGx), and publish immediately. There is deliberately no
+ *    queue/ringbuffer between the sink and MQTT: logs are lossy
+ *    telemetry, and buffering would add a second overflow semantics on
+ *    top of the core's DROPPED accounting. The core's own ISR ringbuffer
+ *    is the rate-mismatch buffer.
+ *  - Publish is non-blocking for the caller (esp_mqtt_client_publish
+ *    enqueues); the QoS 0 packet is dropped if the transport is busy or
+ *    the throttle is exceeded.
+ *
  * The UART/VFS sink (on9log_esp_vfs) can stay registered in parallel for
  * local debugging; both sinks receive the same packets.
  *
@@ -40,10 +52,28 @@ namespace soulcloud
         log_sender(const log_sender &) = delete;
         log_sender &operator=(const log_sender &) = delete;
 
-        /** Installs the sink. */
+        /**
+         * Installs the on9log -> MQTT sink.
+         *
+         * @param cfg    Immutable configuration (borrowed, NOT copied); the
+         *               caller must keep it alive for the lifetime of this
+         *               singleton. Used for the uplink throttle
+         *               (cfg->log_rate_per_s) and the publish topic
+         *               (cfg->device_uid).
+         * @param bridge MQTT bridge (borrowed, must outlive the sink);
+         *               publishes go through bridge->publish().
+         * @return ESP_OK on success; ESP_ERR_INVALID_STATE if already
+         *         installed; ESP_ERR_NO_MEM if the static mutex could not
+         *         be created; ESP_FAIL if the on9log sink table is full.
+         *
+         * @note Safe to call once from the app init path. The sink
+         *       callbacks run on the log source's calling task and take a
+         *       mutex; they must not be invoked from ISR context unless
+         *       the source is the on9log ISR drain task (a task).
+         */
         esp_err_t init(const config *cfg, mqtt_bridge *bridge);
 
-        /** Removes the sink. */
+        /** Removes the sink (idempotent). */
         void deinit();
 
     private:

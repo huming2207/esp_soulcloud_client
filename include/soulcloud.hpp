@@ -25,20 +25,23 @@ namespace soulcloud
 
     struct config
     {
+        // Scalar tunables first (alignment-friendly; the string members
+        // below are all 4-byte multiples so no padding is introduced).
+        uint32_t stat_interval_s;          // stat report period (s)
+        uint32_t log_rate_per_s;           // log uplink throttle (msg/s)
+        uint32_t log_queue_len;            // reserved (log TX queue depth)
+        uint32_t mqtt_buffer_in;           // esp-mqtt rx buffer (bytes)
+        uint32_t mqtt_buffer_out;          // esp-mqtt tx buffer (bytes)
+        uint32_t mqtt_keepalive_s;         // MQTT keepalive (s)
+        uint32_t mqtt_reconnect_timeout_ms; // esp-mqtt auto-reconnect interval
+        uint32_t ota_max_bytes;            // refuse absurd OTA image sizes
+        uint32_t ota_timeout_s;            // per-download watchdog (s)
+
         char device_uid[128];      // MQTT username + client ID
         char device_password[128]; // MQTT credential
         char serial[32];           // stat.sn; empty = derive from MAC
         char broker_uri[256];      // ws://host:port/path (or wss://)
         char api_base_url[256];    // prefix for OTA download urls
-        uint32_t stat_interval_s;
-        uint32_t log_rate_per_s;
-        uint32_t log_queue_len;
-        uint32_t mqtt_buffer_in;
-        uint32_t mqtt_buffer_out;
-        uint32_t mqtt_keepalive_s;
-        uint32_t mqtt_reconnect_timeout_ms;
-        uint32_t ota_max_bytes;
-        uint32_t ota_timeout_s;
     };
 
     /** Persistent configuration store (singleton): Kconfig defaults with
