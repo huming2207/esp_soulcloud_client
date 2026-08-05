@@ -13,7 +13,9 @@
 #include <esp_timer.h>
 
 #include "commands.hpp"
+#include "logs.hpp"
 #include "mqtt_bridge.hpp"
+#include "ota.hpp"
 #include "protocol.hpp"
 
 namespace soulcloud
@@ -144,6 +146,25 @@ namespace soulcloud
             return err;
         }
 
+        err = log_sender::instance().init(cfg, &impl_->bridge);
+        if (err != ESP_OK) {
+            esp_timer_delete(impl_->stat_timer);
+            impl_->bridge.deinit();
+            delete impl_;
+            impl_ = nullptr;
+            return err;
+        }
+
+        err = ota_executor::instance().init(cfg, &impl_->bridge);
+        if (err != ESP_OK) {
+            log_sender::instance().deinit();
+            esp_timer_delete(impl_->stat_timer);
+            impl_->bridge.deinit();
+            delete impl_;
+            impl_ = nullptr;
+            return err;
+        }
+
         inited_ = true;
         ESP_LOGI(TAG, "initialised (uid=%s, broker=%s)", cfg_.device_uid, cfg_.broker_uri);
         return ESP_OK;
@@ -191,6 +212,8 @@ namespace soulcloud
             esp_timer_stop(impl_->stat_timer);
             esp_timer_delete(impl_->stat_timer);
         }
+        log_sender::instance().deinit();
+        ota_executor::instance().deinit();
         impl_->bridge.deinit();
         delete impl_;
         impl_ = nullptr;
@@ -289,9 +312,13 @@ namespace soulcloud
     {
         char expected[160] = {};
 
-        // cmd/exec -> dispatch + result
+        // cmd/exec -> dispatch + result (paused during OTA)
         topic_cmd_exec(expected, sizeof(expected), cfg_.device_uid);
         if (topic_matches(topic, topic_len, expected)) {
+            if (ota_executor::instance().is_active()) {
+                ESP_LOGD(TAG, "command ignored: OTA in progress");
+                return;
+            }
             uint8_t result_buf[1024] = {};
             const int32_t n = command_registry::instance().dispatch(data, data_len,
                                                                     result_buf, sizeof(result_buf));
@@ -304,10 +331,19 @@ namespace soulcloud
             return;
         }
 
-        // ota -> handled by the OTA module (next milestone)
+        // ota -> OTA executor
         topic_ota(expected, sizeof(expected), cfg_.device_uid);
         if (topic_matches(topic, topic_len, expected)) {
-            ESP_LOGW(TAG, "ota notice received; OTA module not implemented yet");
+            ota_notice notice;
+            const int32_t rc = decode_ota_notice(data, data_len, &notice);
+            if (rc != ERR_OK) {
+                ESP_LOGW(TAG, "decode ota notice failed (%ld)", (long)rc);
+                return;
+            }
+            const esp_err_t err = ota_executor::instance().start(&notice);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "ota start failed: %s", esp_err_to_name(err));
+            }
             return;
         }
 
