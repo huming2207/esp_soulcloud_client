@@ -174,7 +174,10 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
         *fail = {-1, "download failed"};
         return false;
     }
-    const int status = esp_http_client_fetch_headers(http);
+    // fetch_headers returns content-length (or 0 if chunked), NOT the HTTP
+    // status code; read the status separately before checking it.
+    esp_http_client_fetch_headers(http);
+    const int status = esp_http_client_get_status_code(http);
     if (status != HttpStatus_Ok) {
         ESP_LOGE(TAG, "download status %d", status);
         esp_http_client_cleanup(http);
