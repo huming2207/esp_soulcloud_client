@@ -146,7 +146,10 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
         return err;
     }
 
-    err = soulcloud::log_sender::instance().init(cfg, &impl_->bridge);
+    // NOTE: pass the copy (cfg_) not the caller's stack pointer: log_sender
+    // and ota_executor keep the pointer for their whole lifetime, and the
+    // caller's `cfg` lives on the main_task stack only until init() returns.
+    err = soulcloud::log_sender::instance().init(&cfg_, &impl_->bridge);
     if (err != ESP_OK) {
         esp_timer_delete(impl_->stat_timer);
         impl_->bridge.deinit();
@@ -155,7 +158,7 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
         return err;
     }
 
-    err = soulcloud::ota_executor::instance().init(cfg, &impl_->bridge);
+    err = soulcloud::ota_executor::instance().init(&cfg_, &impl_->bridge);
     if (err != ESP_OK) {
         soulcloud::log_sender::instance().deinit();
         esp_timer_delete(impl_->stat_timer);
