@@ -12,9 +12,11 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/ringbuf.h>
 #include <freertos/task.h>
 #include <soc/soc_caps.h>
+
+#include <esp_heap_caps.h>
 
 #include "commands.hpp"
 #include "logs.hpp"
@@ -84,22 +86,26 @@ public:
     // Dedicated inbound dispatch task: command handlers and OTA notice
     // handling are application-ish code with unpredictable stack needs;
     // they must not run on the esp-mqtt (6144 B) or esp_timer (3584 B)
-    // task stacks. The MQTT event callback only copies the payload into
-    // inbound_ and signals this task.
+    // task stacks. The MQTT event callback only assembles a small item
+    // (header + payload copy) into a FreeRTOS ring buffer and never runs
+    // handlers itself; the core task drains the buffer.
     volatile TaskHandle_t task_ = nullptr;
-    StaticSemaphore_t event_sem_storage_ = {};
-    SemaphoreHandle_t event_sem_ = nullptr;
-
-    enum class inbound_kind : uint8_t {
-        NONE,
-        CMD,   // cmd/exec payload copied into inbound_
-        OTA,   // ota notice payload copied into inbound_
-    };
-    uint8_t inbound_[CONFIG_SOULCLOUD_INBOUND_MAX] = {};
-    size_t inbound_len_ = 0;
-    inbound_kind inbound_kind_ = inbound_kind::NONE;
-    volatile bool inbound_busy_ = false;  // payload waiting for the core task
+    RingbufHandle_t inbound_rb_ = nullptr;
     volatile bool exit_ = false;
+
+    enum inbound_kind : uint8_t {
+        INBOUND_NONE = 0,
+        INBOUND_CMD,  // cmd/exec payload
+        INBOUND_OTA,  // ota notice payload
+    };
+
+    /** Ring buffer item header (4 bytes, aligned). */
+    struct inbound_header
+    {
+        uint8_t kind;   // inbound_kind
+        uint8_t pad;    // keep len 16-bit aligned
+        uint16_t len;   // payload length
+    };
 
     // C-callback trampolines
     static void mqtt_on_connected(void *ctx)
@@ -131,24 +137,35 @@ public:
     void run()
     {
         for (;;) {
-            xSemaphoreTake(event_sem_, portMAX_DELAY);
+            size_t len = 0;
+            uint8_t *item = (uint8_t *)xRingbufferReceive(inbound_rb_, &len,
+                                                          pdMS_TO_TICKS(100));
+            if (item != nullptr) {
+                if (len >= sizeof(inbound_header)) {
+                    inbound_header hdr = {};
+                    memcpy(&hdr, item, sizeof(hdr));  // unaligned-safe read
+                    const uint8_t *payload = item + sizeof(hdr);
+                    const size_t plen = hdr.len;
+                    // guard against a truncated item (should not happen)
+                    if (plen <= len - sizeof(hdr)) {
+                        switch (hdr.kind) {
+                        case INBOUND_CMD:
+                            owner_.dispatch_command(payload, plen);
+                            break;
+                        case INBOUND_OTA:
+                            owner_.handle_ota_notice(payload, plen);
+                            break;
+                        default:
+                            ESP_LOGW(TAG, "unknown inbound kind %u", (unsigned)hdr.kind);
+                            break;
+                        }
+                    }
+                }
+                vRingbufferReturnItem(inbound_rb_, item);
+            }
             if (exit_) {
                 break;
             }
-            if (!inbound_busy_) {
-                continue;
-            }
-            switch (inbound_kind_) {
-            case inbound_kind::CMD:
-                owner_.dispatch_command(inbound_, inbound_len_);
-                break;
-            case inbound_kind::OTA:
-                owner_.handle_ota_notice(inbound_, inbound_len_);
-                break;
-            default:
-                break;
-            }
-            inbound_busy_ = false;
         }
         task_ = nullptr;  // tell deinit() we are gone (before self-delete)
         vTaskDelete(nullptr);
@@ -203,9 +220,13 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
 
     // Dedicated inbound dispatch task: handlers are application code with
     // unpredictable stack needs, so they run here (large, PSRAM-backed
-    // stack) instead of on the esp-mqtt/esp_timer task stacks.
-    impl_->event_sem_ = xSemaphoreCreateCountingStatic(1, 0, &impl_->event_sem_storage_);
-    if (impl_->event_sem_ == nullptr) {
+    // stack) instead of on the esp-mqtt/esp_timer task stacks. Inbound
+    // messages queue up in a FreeRTOS ring buffer (bytebuf), so a burst
+    // of commands/notices is drained in order instead of dropped.
+    impl_->inbound_rb_ = xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_INBOUND_RB_SIZE,
+                                                   RINGBUF_TYPE_BYTEBUF,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (impl_->inbound_rb_ == nullptr) {
         esp_timer_delete(impl_->stat_timer);
         impl_->bridge.deinit();
         delete impl_;
@@ -218,6 +239,8 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
                               5, &task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     impl_->task_ = task;
     if (err != pdPASS) {
+        vRingbufferDelete(impl_->inbound_rb_);
+        impl_->inbound_rb_ = nullptr;
         esp_timer_delete(impl_->stat_timer);
         impl_->bridge.deinit();
         delete impl_;
@@ -297,8 +320,8 @@ esp_err_t soulcloud::soulcloud_client::deinit()
     // stop the core task: flag + signal, then wait for it to exit
     if (impl_->task_ != nullptr) {
         impl_->exit_ = true;
-        xSemaphoreGive(impl_->event_sem_);
-        // the task deletes itself; wait briefly for it to finish
+        // the task polls the ring buffer on a short timeout, so it wakes
+        // up and self-deletes; wait briefly for it to finish
         for (uint32_t i = 0; i < 100 && impl_->task_ != nullptr; ++i) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -306,6 +329,10 @@ esp_err_t soulcloud::soulcloud_client::deinit()
             vTaskDelete(impl_->task_);  // forced (should not happen)
         }
         impl_->task_ = nullptr;
+    }
+    if (impl_->inbound_rb_ != nullptr) {
+        vRingbufferDelete(impl_->inbound_rb_);
+        impl_->inbound_rb_ = nullptr;
     }
     soulcloud::log_sender::instance().deinit();
     soulcloud::ota_executor::instance().deinit();
@@ -405,47 +432,58 @@ void soulcloud::soulcloud_client::on_mqtt_disconnected()
 void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_len,
                                     const uint8_t *data, size_t data_len)
 {
-    if (impl_ == nullptr) {
+    if (impl_ == nullptr || impl_->inbound_rb_ == nullptr) {
         return;
     }
 
-    // Classify the topic (cheap) and copy the payload into the core
-    // task's inbound buffer. The dispatch itself runs on the dedicated
-    // core task: handlers are application code and must not execute on
-    // the small esp-mqtt event task stack.
+    // Classify the topic (cheap) and enqueue header + payload copy into
+    // the core task's ring buffer. Handlers run on the dedicated core
+    // task: they are application code and must not execute on the small
+    // esp-mqtt event task stack.
     char expected[160] = {};
 
-    client_impl::inbound_kind kind = client_impl::inbound_kind::NONE;
+    client_impl::inbound_kind kind = client_impl::INBOUND_NONE;
     topic_cmd_exec(expected, sizeof(expected), cfg_.device_uid);
     if (topic_matches(topic, topic_len, expected)) {
-        kind = client_impl::inbound_kind::CMD;
+        kind = client_impl::INBOUND_CMD;
     } else {
         topic_ota(expected, sizeof(expected), cfg_.device_uid);
         if (topic_matches(topic, topic_len, expected)) {
-            kind = client_impl::inbound_kind::OTA;
+            kind = client_impl::INBOUND_OTA;
         }
     }
-    if (kind == client_impl::inbound_kind::NONE) {
+    if (kind == client_impl::INBOUND_NONE) {
         ESP_LOGW(TAG, "message on unexpected topic %.*s", (int)topic_len, topic);
         return;
     }
 
-    if (impl_->inbound_busy_) {
-        // previous payload not yet consumed; drop (QoS1 redelivery
-        // covers commands, OTA notices are re-issued by the server)
-        ESP_LOGW(TAG, "inbound buffer busy; dropping %u-byte message", (unsigned)data_len);
-        return;
-    }
-    if (data_len > sizeof(impl_->inbound_)) {
+    if (data_len > CONFIG_SOULCLOUD_INBOUND_MAX) {
         ESP_LOGW(TAG, "inbound payload too large (%u bytes); dropping", (unsigned)data_len);
         return;
     }
 
-    memcpy(impl_->inbound_, data, data_len);
-    impl_->inbound_len_ = data_len;
-    impl_->inbound_kind_ = kind;
-    impl_->inbound_busy_ = true;
-    xSemaphoreGive(impl_->event_sem_);
+    // Assemble one ring buffer item: [header][payload]. The header lives
+    // on this stack; the payload is copied in. Commands/notices are
+    // low-rate, so the short-lived PSRAM allocation is acceptable (the
+    // ring buffer copies the bytes, then we free the staging buffer).
+    client_impl::inbound_header hdr = {};
+    hdr.kind = (uint8_t)kind;
+    hdr.len = (uint16_t)data_len;
+    const size_t item_len = sizeof(hdr) + data_len;
+    uint8_t *item = (uint8_t *)heap_caps_malloc(item_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (item == nullptr) {
+        ESP_LOGW(TAG, "no memory for inbound staging buffer; dropping");
+        return;
+    }
+    memcpy(item, &hdr, sizeof(hdr));
+    memcpy(item + sizeof(hdr), data, data_len);
+
+    // bounded wait for a free slot (backpressure); drop when full
+    // (QoS1 redelivery covers commands, the server re-issues OTA notices)
+    if (xRingbufferSend(impl_->inbound_rb_, item, item_len, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "inbound ring buffer full; dropping %u-byte message", (unsigned)data_len);
+    }
+    heap_caps_free(item);
 }
 
 void soulcloud::soulcloud_client::dispatch_command(const uint8_t *payload, size_t len)

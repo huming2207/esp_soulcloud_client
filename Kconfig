@@ -104,9 +104,19 @@ menu "Soulcloud client"
         default 4096
         range 1024 16384
         help
-            Static buffer for copying inbound cmd/exec and ota payloads
-            in the MQTT event callback before the core task processes
-            them. Larger payloads are dropped with a warning (QoS1
+            Maximum size of a single inbound cmd/exec or ota payload.
+            Larger payloads are dropped with a warning (QoS1
             retransmission covers commands).
+
+    config SOULCLOUD_INBOUND_RB_SIZE
+        int "Inbound ring buffer size (bytes)"
+        default 16384
+        range 4096 65536
+        help
+            Total capacity of the FreeRTOS ring buffer that queues inbound
+            cmd/exec and ota payloads between the MQTT event callback and
+            the core dispatch task. A burst of messages is drained in
+            order; when full, the callback waits up to 100 ms then drops
+            (backpressure). Allocated from PSRAM when available.
 
 endmenu

@@ -14,7 +14,7 @@ idf_component_register(
         "external/mpack/src/mpack/mpack-writer.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "src" "external/mpack/src/mpack"
-    REQUIRES on9log mqtt app_update esp_app_format esp_http_client esp_partition nvs_flash log esp_event esp_system esp_timer
+    REQUIRES on9log mqtt app_update esp_app_format esp_http_client esp_partition nvs_flash log esp_event esp_system esp_timer esp_ringbuf heap
     PRIV_REQUIRES mbedtls
 )
 
