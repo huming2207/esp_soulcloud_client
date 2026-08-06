@@ -11,6 +11,10 @@
 #include <esp_app_desc.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+#include <soc/soc_caps.h>
 
 #include "commands.hpp"
 #include "logs.hpp"
@@ -77,6 +81,26 @@ public:
     esp_timer_handle_t stat_timer = nullptr;
     soulcloud_client &owner_;
 
+    // Dedicated inbound dispatch task: command handlers and OTA notice
+    // handling are application-ish code with unpredictable stack needs;
+    // they must not run on the esp-mqtt (6144 B) or esp_timer (3584 B)
+    // task stacks. The MQTT event callback only copies the payload into
+    // inbound_ and signals this task.
+    volatile TaskHandle_t task_ = nullptr;
+    StaticSemaphore_t event_sem_storage_ = {};
+    SemaphoreHandle_t event_sem_ = nullptr;
+
+    enum class inbound_kind : uint8_t {
+        NONE,
+        CMD,   // cmd/exec payload copied into inbound_
+        OTA,   // ota notice payload copied into inbound_
+    };
+    uint8_t inbound_[CONFIG_SOULCLOUD_INBOUND_MAX] = {};
+    size_t inbound_len_ = 0;
+    inbound_kind inbound_kind_ = inbound_kind::NONE;
+    volatile bool inbound_busy_ = false;  // payload waiting for the core task
+    volatile bool exit_ = false;
+
     // C-callback trampolines
     static void mqtt_on_connected(void *ctx)
     {
@@ -97,6 +121,37 @@ public:
     static void stat_timer_cb(void *ctx)
     {
         static_cast<client_impl *>(ctx)->owner_.report_stat();
+    }
+
+    static void task_main(void *ctx)
+    {
+        static_cast<client_impl *>(ctx)->run();
+    }
+
+    void run()
+    {
+        for (;;) {
+            xSemaphoreTake(event_sem_, portMAX_DELAY);
+            if (exit_) {
+                break;
+            }
+            if (!inbound_busy_) {
+                continue;
+            }
+            switch (inbound_kind_) {
+            case inbound_kind::CMD:
+                owner_.dispatch_command(inbound_, inbound_len_);
+                break;
+            case inbound_kind::OTA:
+                owner_.handle_ota_notice(inbound_, inbound_len_);
+                break;
+            default:
+                break;
+            }
+            inbound_busy_ = false;
+        }
+        task_ = nullptr;  // tell deinit() we are gone (before self-delete)
+        vTaskDelete(nullptr);
     }
 };
 
@@ -144,6 +199,30 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
         delete impl_;
         impl_ = nullptr;
         return err;
+    }
+
+    // Dedicated inbound dispatch task: handlers are application code with
+    // unpredictable stack needs, so they run here (large, PSRAM-backed
+    // stack) instead of on the esp-mqtt/esp_timer task stacks.
+    impl_->event_sem_ = xSemaphoreCreateCountingStatic(1, 0, &impl_->event_sem_storage_);
+    if (impl_->event_sem_ == nullptr) {
+        esp_timer_delete(impl_->stat_timer);
+        impl_->bridge.deinit();
+        delete impl_;
+        impl_ = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+    TaskHandle_t task = nullptr;
+    err = xTaskCreateWithCaps(client_impl::task_main, "soulcloud_core",
+                              CONFIG_SOULCLOUD_CORE_TASK_STACK, impl_,
+                              5, &task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    impl_->task_ = task;
+    if (err != pdPASS) {
+        esp_timer_delete(impl_->stat_timer);
+        impl_->bridge.deinit();
+        delete impl_;
+        impl_ = nullptr;
+        return ESP_ERR_NO_MEM;
     }
 
     // NOTE: pass the copy (cfg_) not the caller's stack pointer: log_sender
@@ -214,6 +293,19 @@ esp_err_t soulcloud::soulcloud_client::deinit()
     if (impl_->stat_timer != nullptr) {
         esp_timer_stop(impl_->stat_timer);
         esp_timer_delete(impl_->stat_timer);
+    }
+    // stop the core task: flag + signal, then wait for it to exit
+    if (impl_->task_ != nullptr) {
+        impl_->exit_ = true;
+        xSemaphoreGive(impl_->event_sem_);
+        // the task deletes itself; wait briefly for it to finish
+        for (uint32_t i = 0; i < 100 && impl_->task_ != nullptr; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (impl_->task_ != nullptr) {
+            vTaskDelete(impl_->task_);  // forced (should not happen)
+        }
+        impl_->task_ = nullptr;
     }
     soulcloud::log_sender::instance().deinit();
     soulcloud::ota_executor::instance().deinit();
@@ -313,44 +405,80 @@ void soulcloud::soulcloud_client::on_mqtt_disconnected()
 void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_len,
                                     const uint8_t *data, size_t data_len)
 {
+    if (impl_ == nullptr) {
+        return;
+    }
+
+    // Classify the topic (cheap) and copy the payload into the core
+    // task's inbound buffer. The dispatch itself runs on the dedicated
+    // core task: handlers are application code and must not execute on
+    // the small esp-mqtt event task stack.
     char expected[160] = {};
 
-    // cmd/exec -> dispatch + result (paused during OTA)
+    client_impl::inbound_kind kind = client_impl::inbound_kind::NONE;
     topic_cmd_exec(expected, sizeof(expected), cfg_.device_uid);
     if (topic_matches(topic, topic_len, expected)) {
-        if (soulcloud::ota_executor::instance().is_active()) {
-            ESP_LOGD(TAG, "command ignored: OTA in progress");
-            return;
+        kind = client_impl::inbound_kind::CMD;
+    } else {
+        topic_ota(expected, sizeof(expected), cfg_.device_uid);
+        if (topic_matches(topic, topic_len, expected)) {
+            kind = client_impl::inbound_kind::OTA;
         }
-        uint8_t result_buf[1024] = {};
-        const int32_t n = soulcloud::command_registry::instance().dispatch(data, data_len,
-                                                                result_buf, sizeof(result_buf));
-        if (n > 0) {
-            topic_cmd_result(expected, sizeof(expected), cfg_.device_uid);
-            impl_->bridge.publish(expected, result_buf, (size_t)n, 1);
-        } else {
-            ESP_LOGW(TAG, "cmd/exec dispatch failed (%ld)", (long)n);
-        }
+    }
+    if (kind == client_impl::inbound_kind::NONE) {
+        ESP_LOGW(TAG, "message on unexpected topic %.*s", (int)topic_len, topic);
         return;
     }
 
-    // ota -> OTA executor
-    topic_ota(expected, sizeof(expected), cfg_.device_uid);
-    if (topic_matches(topic, topic_len, expected)) {
-        ota_notice notice;
-        const int32_t rc = decode_ota_notice(data, data_len, &notice);
-        if (rc != ERR_OK) {
-            ESP_LOGW(TAG, "decode ota notice failed (%ld)", (long)rc);
-            return;
-        }
-        const esp_err_t err = soulcloud::ota_executor::instance().start(&notice);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "ota start failed: %s", esp_err_to_name(err));
-        }
+    if (impl_->inbound_busy_) {
+        // previous payload not yet consumed; drop (QoS1 redelivery
+        // covers commands, OTA notices are re-issued by the server)
+        ESP_LOGW(TAG, "inbound buffer busy; dropping %u-byte message", (unsigned)data_len);
+        return;
+    }
+    if (data_len > sizeof(impl_->inbound_)) {
+        ESP_LOGW(TAG, "inbound payload too large (%u bytes); dropping", (unsigned)data_len);
         return;
     }
 
-    ESP_LOGW(TAG, "message on unexpected topic %.*s", (int)topic_len, topic);
+    memcpy(impl_->inbound_, data, data_len);
+    impl_->inbound_len_ = data_len;
+    impl_->inbound_kind_ = kind;
+    impl_->inbound_busy_ = true;
+    xSemaphoreGive(impl_->event_sem_);
+}
+
+void soulcloud::soulcloud_client::dispatch_command(const uint8_t *payload, size_t len)
+{
+    // commands are paused during OTA
+    if (soulcloud::ota_executor::instance().is_active()) {
+        ESP_LOGD(TAG, "command ignored: OTA in progress");
+        return;
+    }
+    uint8_t result_buf[1024] = {};
+    const int32_t n = soulcloud::command_registry::instance().dispatch(payload, len,
+                                                            result_buf, sizeof(result_buf));
+    if (n > 0) {
+        char topic[160] = {};
+        topic_cmd_result(topic, sizeof(topic), cfg_.device_uid);
+        impl_->bridge.publish(topic, result_buf, (size_t)n, 1);
+    } else {
+        ESP_LOGW(TAG, "cmd/exec dispatch failed (%ld)", (long)n);
+    }
+}
+
+void soulcloud::soulcloud_client::handle_ota_notice(const uint8_t *payload, size_t len)
+{
+    ota_notice notice;
+    const int32_t rc = decode_ota_notice(payload, len, &notice);
+    if (rc != ERR_OK) {
+        ESP_LOGW(TAG, "decode ota notice failed (%ld)", (long)rc);
+        return;
+    }
+    const esp_err_t err = soulcloud::ota_executor::instance().start(&notice);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ota start failed: %s", esp_err_to_name(err));
+    }
 }
 
 void soulcloud::soulcloud_client::notify_wifi_connected()

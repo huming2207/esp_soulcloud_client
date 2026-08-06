@@ -88,4 +88,25 @@ menu "Soulcloud client"
         default 120
         range 10 3600
 
+    config SOULCLOUD_CORE_TASK_STACK
+        int "Client core task stack size (bytes)"
+        default 16384
+        range 8192 65536
+        help
+            Stack for the dedicated task that dispatches inbound commands
+            and OTA notices. Handlers are application code and may use
+            deep stacks, so this must NOT run on the small esp-mqtt or
+            esp_timer task stacks (defaults 6144/3584 bytes). The task is
+            allocated from PSRAM when available.
+
+    config SOULCLOUD_INBOUND_MAX
+        int "Inbound command/OTA payload buffer (bytes)"
+        default 4096
+        range 1024 16384
+        help
+            Static buffer for copying inbound cmd/exec and ota payloads
+            in the MQTT event callback before the core task processes
+            them. Larger payloads are dropped with a warning (QoS1
+            retransmission covers commands).
+
 endmenu

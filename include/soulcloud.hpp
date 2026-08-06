@@ -294,8 +294,15 @@ namespace soulcloud
 
         void on_mqtt_connected();
         void on_mqtt_disconnected();
+        /** MQTT event callback: classifies the topic, copies the payload
+         *  into the core task's inbound buffer and signals it (never
+         *  runs handlers on the esp-mqtt task stack). */
         void on_mqtt_data(const char *topic, size_t topic_len,
                           const uint8_t *data, size_t data_len);
+        /** Core task: dispatches a copied cmd/exec payload. */
+        void dispatch_command(const uint8_t *payload, size_t len);
+        /** Core task: decodes and starts an OTA notice. */
+        void handle_ota_notice(const uint8_t *payload, size_t len);
         void build_stat(uint8_t *buf, size_t cap, size_t *out_len);
 
         static const char *reset_reason_str(esp_reset_reason_t r);
