@@ -34,18 +34,18 @@ using namespace soulcloud;
 
 esp_err_t soulcloud::ota_executor::init(const config *cfg, mqtt_bridge *bridge)
 {
-    if (cfg_ != nullptr) {
+    if (_cfg != nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    cfg_ = cfg;
-    bridge_ = bridge;
+    _cfg = cfg;
+    _bridge = bridge;
     return ESP_OK;
 }
 
 void soulcloud::ota_executor::deinit()
 {
-    cfg_ = nullptr;
-    bridge_ = nullptr;
+    _cfg = nullptr;
+    _bridge = nullptr;
 }
 
 bool soulcloud::ota_executor::last_ota_matches(const char *release_id) const
@@ -75,7 +75,7 @@ void soulcloud::ota_executor::store_last_ota(const char *release_id)
 
 esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
 {
-    if (cfg_ == nullptr || bridge_ == nullptr || active_) {
+    if (_cfg == nullptr || _bridge == nullptr || active) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -86,24 +86,24 @@ esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
     }
 
     // sanity: refuse absurd image sizes (partition guard)
-    if (notice->bin_size > cfg_->ota_max_bytes) {
+    if (notice->bin_size > _cfg->ota_max_bytes) {
         ESP_LOGE(TAG, "bin_size %u exceeds limit %lu", notice->bin_size,
-                 (unsigned long)cfg_->ota_max_bytes);
+                 (unsigned long)_cfg->ota_max_bytes);
         return ESP_ERR_INVALID_SIZE;
     }
 
-    snprintf(pending_.release_id, sizeof(pending_.release_id), "%s", notice->release_id);
-    snprintf(pending_.job_id, sizeof(pending_.job_id), "%s", notice->job_id);
-    snprintf(pending_.bin_sha256, sizeof(pending_.bin_sha256), "%s", notice->bin_sha256);
-    pending_.bin_size = notice->bin_size;
-    snprintf(pending_.download_url, sizeof(pending_.download_url), "%s", notice->download_url);
-    snprintf(pending_.download_token, sizeof(pending_.download_token), "%s", notice->download_token);
+    snprintf(pending.release_id, sizeof(pending.release_id), "%s", notice->release_id);
+    snprintf(pending.job_id, sizeof(pending.job_id), "%s", notice->job_id);
+    snprintf(pending.bin_sha256, sizeof(pending.bin_sha256), "%s", notice->bin_sha256);
+    pending.bin_size = notice->bin_size;
+    snprintf(pending.download_url, sizeof(pending.download_url), "%s", notice->download_url);
+    snprintf(pending.download_token, sizeof(pending.download_token), "%s", notice->download_token);
 
-    active_ = true;
+    active = true;
     const BaseType_t created = xTaskCreate(task_trampoline, "soulcloud_ota",
-                                           TASK_STACK, this, TASK_PRIORITY, &task_);
+                                           TASK_STACK, this, TASK_PRIORITY, &task);
     if (created != pdPASS) {
-        active_ = false;
+        active = false;
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -116,14 +116,14 @@ void soulcloud::ota_executor::task_trampoline(void *ctx)
 
 void soulcloud::ota_executor::report_state(const char *state, int32_t code, const char *message)
 {
-    if (bridge_ == nullptr) {
+    if (_bridge == nullptr) {
         return;
     }
     uint8_t buf[1024] = {};
     size_t len = 0;
     const ota_result result = {
-        .release_id = pending_.release_id,
-        .job_id = pending_.job_id,
+        .release_id = pending.release_id,
+        .job_id = pending.job_id,
         .state = state,
         .code = code,
         .message = message,  // NULL -> omitted (backend rejects null)
@@ -133,8 +133,8 @@ void soulcloud::ota_executor::report_state(const char *state, int32_t code, cons
         return;
     }
     char topic[160] = {};
-    topic_ota_result(topic, sizeof(topic), cfg_->device_uid);
-    bridge_->publish(topic, buf, len, 1);
+    topic_ota_result(topic, sizeof(topic), _cfg->device_uid);
+    _bridge->publish(topic, buf, len, 1);
 }
 
 /**
@@ -149,12 +149,12 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
                                        size_t *total_out, ota_fail *fail)
 {
     char url[512] = {};
-    snprintf(url, sizeof(url), "%s%s", cfg_->api_base_url, pending_.download_url);
+    snprintf(url, sizeof(url), "%s%s", _cfg->api_base_url, pending.download_url);
 
     esp_http_client_config_t http_cfg = {};
     http_cfg.url = url;
     http_cfg.method = HTTP_METHOD_GET;
-    http_cfg.timeout_ms = (int)cfg_->ota_timeout_s * 1000;
+    http_cfg.timeout_ms = (int)_cfg->ota_timeout_s * 1000;
     http_cfg.buffer_size = (int)CHUNK;
     http_cfg.user_agent = "soulcloud-esp32";
     http_cfg.disable_auto_redirect = true;
@@ -166,7 +166,7 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     }
 
     char auth[544] = {};
-    snprintf(auth, sizeof(auth), "Bearer %s", pending_.download_token);
+    snprintf(auth, sizeof(auth), "Bearer %s", pending.download_token);
     esp_http_client_set_header(http, "Authorization", auth);
 
     if (esp_http_client_open(http, 0) != ESP_OK) {
@@ -232,7 +232,7 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
             break;
         }
         total += (size_t)n;
-        if (total > cfg_->ota_max_bytes) {
+        if (total > _cfg->ota_max_bytes) {
             ESP_LOGE(TAG, "image exceeds size limit");
             stream_ok = false;
             break;
@@ -260,15 +260,15 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
 
     bool match = true;
     for (size_t i = 0; i < 32; ++i) {
-        const int hi = hex_val(pending_.bin_sha256[i * 2]);
-        const int lo = hex_val(pending_.bin_sha256[i * 2 + 1]);
+        const int hi = hex_val(pending.bin_sha256[i * 2]);
+        const int lo = hex_val(pending.bin_sha256[i * 2 + 1]);
         if ((uint8_t)((hi << 4) | lo) != digest[i]) {
             match = false;
         }
     }
     if (!match) {
         ESP_LOGE(TAG, "sha256 mismatch (got %02x%02x..., expected %.16s...)",
-                 digest[0], digest[1], pending_.bin_sha256);
+                 digest[0], digest[1], pending.bin_sha256);
         esp_ota_abort(ota_handle);
         *fail = {-2, "checksum mismatch"};
         return false;
@@ -283,7 +283,7 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
 void soulcloud::ota_executor::run()
 {
     ESP_LOGI(TAG, "OTA start: release %s, %u bytes",
-             pending_.release_id, pending_.bin_size);
+             pending.release_id, pending.bin_size);
 
     esp_ota_handle_t ota_handle = 0;
     const esp_partition_t *partition = nullptr;
@@ -293,8 +293,8 @@ void soulcloud::ota_executor::run()
     if (!download_and_verify(&ota_handle, &partition, &total, &fail)) {
         ESP_LOGE(TAG, "OTA failed: %s", fail.msg);
         report_state("failed", fail.code, fail.msg);
-        active_ = false;
-        task_ = nullptr;
+        active = false;
+        task = nullptr;
         vTaskDelete(nullptr);
         return;
     }
@@ -305,8 +305,8 @@ void soulcloud::ota_executor::run()
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
         report_state("failed", err == ESP_ERR_OTA_VALIDATE_FAILED ? -4 : -3, "image invalid");
-        active_ = false;
-        task_ = nullptr;
+        active = false;
+        task = nullptr;
         vTaskDelete(nullptr);
         return;
     }
@@ -315,13 +315,13 @@ void soulcloud::ota_executor::run()
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
         report_state("failed", -3, "boot switch failed");
-        active_ = false;
-        task_ = nullptr;
+        active = false;
+        task = nullptr;
         vTaskDelete(nullptr);
         return;
     }
 
-    store_last_ota(pending_.release_id);
+    store_last_ota(pending.release_id);
     report_state("installed", 0, nullptr);
     ESP_LOGI(TAG, "OTA installed; restarting");
 

@@ -17,29 +17,29 @@ esp_err_t soulcloud::command_registry::register_command(const char *name, comman
     if (name == nullptr || name[0] == '\0' || handler == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
-    for (uint32_t i = 0; i < count_; ++i) {
-        if (strcmp(entries_[i].name, name) == 0) {
-            entries_[i].handler = handler;  // replace
-            entries_[i].ctx = ctx;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (strcmp(entries[i].name, name) == 0) {
+            entries[i].handler = handler;  // replace
+            entries[i].ctx = ctx;
             return ESP_OK;
         }
     }
-    if (count_ >= MAX_COMMANDS) {
+    if (count >= MAX_COMMANDS) {
         ESP_LOGE(TAG, "command registry full (%u)", MAX_COMMANDS);
         return ESP_ERR_NO_MEM;
     }
-    entries_[count_].name = name;
-    entries_[count_].handler = handler;
-    entries_[count_].ctx = ctx;
-    count_++;
+    entries[count].name = name;
+    entries[count].handler = handler;
+    entries[count].ctx = ctx;
+    count++;
     return ESP_OK;
 }
 
 soulcloud::command_registry::recent_entry *soulcloud::command_registry::recent_find(const uint8_t *id)
 {
     for (uint32_t i = 0; i < RECENT_CACHE; ++i) {
-        if (recent_[i].valid && memcmp(recent_[i].id, id, 16) == 0) {
-            return &recent_[i];
+        if (recent[i].valid && memcmp(recent[i].id, id, 16) == 0) {
+            return &recent[i];
         }
     }
     return nullptr;
@@ -47,8 +47,8 @@ soulcloud::command_registry::recent_entry *soulcloud::command_registry::recent_f
 
 void soulcloud::command_registry::recent_put(const uint8_t *id, int32_t code)
 {
-    recent_entry *e = &recent_[recent_head_];
-    recent_head_ = (recent_head_ + 1) % RECENT_CACHE;
+    recent_entry *e = &recent[recent_head];
+    recent_head = (recent_head + 1) % RECENT_CACHE;
     memcpy(e->id, id, 16);
     e->code = code;
     e->valid = true;
@@ -84,11 +84,11 @@ int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len
     // find the handler
     command_handler_t handler = nullptr;
     void *ctx = nullptr;
-    for (uint32_t i = 0; i < count_; ++i) {
-        const size_t nlen = strlen(entries_[i].name);
-        if (nlen == exec.cmd_len && memcmp(entries_[i].name, exec.cmd, nlen) == 0) {
-            handler = entries_[i].handler;
-            ctx = entries_[i].ctx;
+    for (uint32_t i = 0; i < count; ++i) {
+        const size_t nlen = strlen(entries[i].name);
+        if (nlen == exec.cmd_len && memcmp(entries[i].name, exec.cmd, nlen) == 0) {
+            handler = entries[i].handler;
+            ctx = entries[i].ctx;
             break;
         }
     }

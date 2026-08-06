@@ -77,11 +77,11 @@ bool soulcloud::soulcloud_client::topic_matches(const char *topic, size_t topic_
 class soulcloud::soulcloud_client::client_impl
 {
 public:
-    explicit client_impl(soulcloud_client &owner) : owner_(owner) {}
+    explicit client_impl(soulcloud_client &owner) : owner(owner) {}
 
     mqtt_bridge bridge;
     esp_timer_handle_t stat_timer = nullptr;
-    soulcloud_client &owner_;
+    soulcloud_client &owner;
 
     // Dedicated inbound dispatch task: command handlers and OTA notice
     // handling are application-ish code with unpredictable stack needs;
@@ -89,9 +89,9 @@ public:
     // task stacks. The MQTT event callback only assembles a small item
     // (header + payload copy) into a FreeRTOS ring buffer and never runs
     // handlers itself; the core task drains the buffer.
-    volatile TaskHandle_t task_ = nullptr;
-    RingbufHandle_t inbound_rb_ = nullptr;
-    volatile bool exit_ = false;
+    volatile TaskHandle_t task = nullptr;
+    RingbufHandle_t inbound_rb = nullptr;
+    volatile bool exit = false;
 
     enum inbound_kind : uint8_t {
         INBOUND_NONE = 0,
@@ -110,23 +110,23 @@ public:
     // C-callback trampolines
     static void mqtt_on_connected(void *ctx)
     {
-        static_cast<client_impl *>(ctx)->owner_.on_mqtt_connected();
+        static_cast<client_impl *>(ctx)->owner.on_mqtt_connected();
     }
 
     static void mqtt_on_disconnected(void *ctx)
     {
-        static_cast<client_impl *>(ctx)->owner_.on_mqtt_disconnected();
+        static_cast<client_impl *>(ctx)->owner.on_mqtt_disconnected();
     }
 
     static void mqtt_on_data(void *ctx, const char *topic, size_t topic_len,
                              const uint8_t *data, size_t data_len)
     {
-        static_cast<client_impl *>(ctx)->owner_.on_mqtt_data(topic, topic_len, data, data_len);
+        static_cast<client_impl *>(ctx)->owner.on_mqtt_data(topic, topic_len, data, data_len);
     }
 
     static void stat_timer_cb(void *ctx)
     {
-        static_cast<client_impl *>(ctx)->owner_.report_stat();
+        static_cast<client_impl *>(ctx)->owner.report_stat();
     }
 
     static void task_main(void *ctx)
@@ -137,23 +137,26 @@ public:
     void run()
     {
         for (;;) {
+            // Ring buffers are polled with zero-tick receives (empty is a
+            // NULL return), so no wake-up signalling is needed; a 1-tick
+            // delay keeps the poll cheap and bounds latency.
+
+            // drain inbound (commands/OTA) without blocking
             size_t len = 0;
-            uint8_t *item = (uint8_t *)xRingbufferReceive(inbound_rb_, &len,
-                                                          pdMS_TO_TICKS(100));
-            if (item != nullptr) {
+            uint8_t *item = (uint8_t *)xRingbufferReceive(inbound_rb, &len, 0);
+            while (item != nullptr) {
                 if (len >= sizeof(inbound_header)) {
                     inbound_header hdr = {};
                     memcpy(&hdr, item, sizeof(hdr));  // unaligned-safe read
                     const uint8_t *payload = item + sizeof(hdr);
                     const size_t plen = hdr.len;
-                    // guard against a truncated item (should not happen)
-                    if (plen <= len - sizeof(hdr)) {
+                    if (plen <= len - sizeof(hdr)) {  // truncated-item guard
                         switch (hdr.kind) {
                         case INBOUND_CMD:
-                            owner_.dispatch_command(payload, plen);
+                            owner.dispatch_command(payload, plen);
                             break;
                         case INBOUND_OTA:
-                            owner_.handle_ota_notice(payload, plen);
+                            owner.handle_ota_notice(payload, plen);
                             break;
                         default:
                             ESP_LOGW(TAG, "unknown inbound kind %u", (unsigned)hdr.kind);
@@ -161,13 +164,19 @@ public:
                         }
                     }
                 }
-                vRingbufferReturnItem(inbound_rb_, item);
+                vRingbufferReturnItem(inbound_rb, item);
+                item = (uint8_t *)xRingbufferReceive(inbound_rb, &len, 0);
             }
-            if (exit_) {
+
+            // drain queued log packets (throttled publish, never blocks)
+            soulcloud::log_sender::instance().drain();
+
+            if (exit) {
                 break;
             }
+            vTaskDelay(1);  // 1 RTOS tick poll interval
         }
-        task_ = nullptr;  // tell deinit() we are gone (before self-delete)
+        task = nullptr;  // tell deinit() we are gone (before self-delete)
         vTaskDelete(nullptr);
     }
 };
@@ -178,43 +187,43 @@ public:
 
 esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
 {
-    if (inited_) {
+    if (inited) {
         return ESP_ERR_INVALID_STATE;
     }
     if (cfg == nullptr || cfg->device_uid[0] == '\0' || cfg->broker_uri[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
 
-    cfg_ = *cfg;
-    impl_ = new client_impl(*this);  // sole heap allocation (deinit frees)
+    _cfg = *cfg;
+    impl = new client_impl(*this);  // sole heap allocation (deinit frees)
 
     const mqtt_callbacks cbs = {
         .on_connected = client_impl::mqtt_on_connected,
         .on_disconnected = client_impl::mqtt_on_disconnected,
         .on_data = client_impl::mqtt_on_data,
         .on_error = nullptr,
-        .ctx = impl_,
+        .ctx = impl,
     };
 
-    esp_err_t err = impl_->bridge.init(cfg, &cbs);
+    esp_err_t err = impl->bridge.init(cfg, &cbs);
     if (err != ESP_OK) {
-        delete impl_;
-        impl_ = nullptr;
+        delete impl;
+        impl = nullptr;
         return err;
     }
 
     const esp_timer_create_args_t timer_args = {
         .callback = client_impl::stat_timer_cb,
-        .arg = impl_,
+        .arg = impl,
         .dispatch_method = ESP_TIMER_TASK,
         .name = "soulcloud_stat",
         .skip_unhandled_events = false,
     };
-    err = esp_timer_create(&timer_args, &impl_->stat_timer);
+    err = esp_timer_create(&timer_args, &impl->stat_timer);
     if (err != ESP_OK) {
-        impl_->bridge.deinit();
-        delete impl_;
-        impl_ = nullptr;
+        impl->bridge.deinit();
+        delete impl;
+        impl = nullptr;
         return err;
     }
 
@@ -223,125 +232,125 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     // stack) instead of on the esp-mqtt/esp_timer task stacks. Inbound
     // messages queue up in a FreeRTOS ring buffer (bytebuf), so a burst
     // of commands/notices is drained in order instead of dropped.
-    impl_->inbound_rb_ = xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_INBOUND_RB_SIZE,
+    impl->inbound_rb = xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_INBOUND_RB_SIZE,
                                                    RINGBUF_TYPE_BYTEBUF,
                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (impl_->inbound_rb_ == nullptr) {
-        esp_timer_delete(impl_->stat_timer);
-        impl_->bridge.deinit();
-        delete impl_;
-        impl_ = nullptr;
+    if (impl->inbound_rb == nullptr) {
+        esp_timer_delete(impl->stat_timer);
+        impl->bridge.deinit();
+        delete impl;
+        impl = nullptr;
         return ESP_ERR_NO_MEM;
     }
     TaskHandle_t task = nullptr;
     err = xTaskCreateWithCaps(client_impl::task_main, "soulcloud_core",
-                              CONFIG_SOULCLOUD_CORE_TASK_STACK, impl_,
+                              CONFIG_SOULCLOUD_CORE_TASK_STACK, impl,
                               5, &task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    impl_->task_ = task;
+    impl->task = task;
     if (err != pdPASS) {
-        vRingbufferDelete(impl_->inbound_rb_);
-        impl_->inbound_rb_ = nullptr;
-        esp_timer_delete(impl_->stat_timer);
-        impl_->bridge.deinit();
-        delete impl_;
-        impl_ = nullptr;
+        vRingbufferDelete(impl->inbound_rb);
+        impl->inbound_rb = nullptr;
+        esp_timer_delete(impl->stat_timer);
+        impl->bridge.deinit();
+        delete impl;
+        impl = nullptr;
         return ESP_ERR_NO_MEM;
     }
 
-    // NOTE: pass the copy (cfg_) not the caller's stack pointer: log_sender
+    // NOTE: pass the copy (cfg) not the caller's stack pointer: log_sender
     // and ota_executor keep the pointer for their whole lifetime, and the
     // caller's `cfg` lives on the main_task stack only until init() returns.
-    err = soulcloud::log_sender::instance().init(&cfg_, &impl_->bridge);
+    err = soulcloud::log_sender::instance().init(&_cfg, &impl->bridge);
     if (err != ESP_OK) {
-        esp_timer_delete(impl_->stat_timer);
-        impl_->bridge.deinit();
-        delete impl_;
-        impl_ = nullptr;
+        esp_timer_delete(impl->stat_timer);
+        impl->bridge.deinit();
+        delete impl;
+        impl = nullptr;
         return err;
     }
 
-    err = soulcloud::ota_executor::instance().init(&cfg_, &impl_->bridge);
+    err = soulcloud::ota_executor::instance().init(&_cfg, &impl->bridge);
     if (err != ESP_OK) {
         soulcloud::log_sender::instance().deinit();
-        esp_timer_delete(impl_->stat_timer);
-        impl_->bridge.deinit();
-        delete impl_;
-        impl_ = nullptr;
+        esp_timer_delete(impl->stat_timer);
+        impl->bridge.deinit();
+        delete impl;
+        impl = nullptr;
         return err;
     }
 
-    inited_ = true;
-    ESP_LOGI(TAG, "initialised (uid=%s, broker=%s)", cfg_.device_uid, cfg_.broker_uri);
+    inited = true;
+    ESP_LOGI(TAG, "initialised (uid=%s, broker=%s)", _cfg.device_uid, _cfg.broker_uri);
     return ESP_OK;
 }
 
 esp_err_t soulcloud::soulcloud_client::start()
 {
-    if (!inited_ || impl_ == nullptr) {
+    if (!inited || impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (started_) {
+    if (started) {
         return ESP_OK;
     }
-    esp_err_t err = impl_->bridge.start();
+    esp_err_t err = impl->bridge.start();
     if (err != ESP_OK) {
         return err;
     }
-    started_ = true;
-    if (impl_->stat_timer != nullptr) {
-        esp_timer_start_periodic(impl_->stat_timer, (uint64_t)cfg_.stat_interval_s * 1000000ull);
+    started = true;
+    if (impl->stat_timer != nullptr) {
+        esp_timer_start_periodic(impl->stat_timer, (uint64_t)_cfg.stat_interval_s * 1000000ull);
     }
     return ESP_OK;
 }
 
 esp_err_t soulcloud::soulcloud_client::stop()
 {
-    if (!inited_ || impl_ == nullptr) {
+    if (!inited || impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (impl_->stat_timer != nullptr) {
-        esp_timer_stop(impl_->stat_timer);
+    if (impl->stat_timer != nullptr) {
+        esp_timer_stop(impl->stat_timer);
     }
-    impl_->bridge.stop();
-    started_ = false;
-    connected_ = false;
+    impl->bridge.stop();
+    started = false;
+    connected = false;
     return ESP_OK;
 }
 
 esp_err_t soulcloud::soulcloud_client::deinit()
 {
-    if (!inited_ || impl_ == nullptr) {
+    if (!inited || impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (impl_->stat_timer != nullptr) {
-        esp_timer_stop(impl_->stat_timer);
-        esp_timer_delete(impl_->stat_timer);
+    if (impl->stat_timer != nullptr) {
+        esp_timer_stop(impl->stat_timer);
+        esp_timer_delete(impl->stat_timer);
     }
     // stop the core task: flag + signal, then wait for it to exit
-    if (impl_->task_ != nullptr) {
-        impl_->exit_ = true;
+    if (impl->task != nullptr) {
+        impl->exit = true;
         // the task polls the ring buffer on a short timeout, so it wakes
         // up and self-deletes; wait briefly for it to finish
-        for (uint32_t i = 0; i < 100 && impl_->task_ != nullptr; ++i) {
+        for (uint32_t i = 0; i < 100 && impl->task != nullptr; ++i) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
-        if (impl_->task_ != nullptr) {
-            vTaskDelete(impl_->task_);  // forced (should not happen)
+        if (impl->task != nullptr) {
+            vTaskDelete(impl->task);  // forced (should not happen)
         }
-        impl_->task_ = nullptr;
+        impl->task = nullptr;
     }
-    if (impl_->inbound_rb_ != nullptr) {
-        vRingbufferDelete(impl_->inbound_rb_);
-        impl_->inbound_rb_ = nullptr;
+    if (impl->inbound_rb != nullptr) {
+        vRingbufferDelete(impl->inbound_rb);
+        impl->inbound_rb = nullptr;
     }
     soulcloud::log_sender::instance().deinit();
     soulcloud::ota_executor::instance().deinit();
-    impl_->bridge.deinit();
-    delete impl_;
-    impl_ = nullptr;
-    inited_ = false;
-    started_ = false;
-    connected_ = false;
+    impl->bridge.deinit();
+    delete impl;
+    impl = nullptr;
+    inited = false;
+    started = false;
+    connected = false;
     return ESP_OK;
 }
 
@@ -369,8 +378,8 @@ void soulcloud::soulcloud_client::build_stat(uint8_t *buf, size_t cap, size_t *o
     const uint64_t up = (uint64_t)(esp_timer_get_time() / 1000000);
 
     const device_stat stat = {
-        .sn = cfg_.serial,
-        .sn_len = strlen(cfg_.serial),
+        .sn = _cfg.serial,
+        .sn_len = strlen(_cfg.serial),
         .fw = fw,
         .fw_len = FW_SHA256_LEN,
         .up = up,
@@ -381,7 +390,7 @@ void soulcloud::soulcloud_client::build_stat(uint8_t *buf, size_t cap, size_t *o
 
 esp_err_t soulcloud::soulcloud_client::report_stat()
 {
-    if (!inited_ || impl_ == nullptr) {
+    if (!inited || impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
     uint8_t buf[256] = {};
@@ -389,8 +398,8 @@ esp_err_t soulcloud::soulcloud_client::report_stat()
     build_stat(buf, sizeof(buf), &len);
 
     char topic[160] = {};
-    topic_stat(topic, sizeof(topic), cfg_.device_uid);
-    const int32_t msg_id = impl_->bridge.publish(topic, buf, len, 1);
+    topic_stat(topic, sizeof(topic), _cfg.device_uid);
+    const int32_t msg_id = impl->bridge.publish(topic, buf, len, 1);
     if (msg_id < 0) {
         ESP_LOGW(TAG, "stat publish failed");
         return ESP_FAIL;
@@ -405,34 +414,34 @@ esp_err_t soulcloud::soulcloud_client::report_stat()
 
 void soulcloud::soulcloud_client::on_mqtt_connected()
 {
-    connected_ = true;
+    connected = true;
 
     char topic[160] = {};
-    topic_cmd_exec(topic, sizeof(topic), cfg_.device_uid);
-    impl_->bridge.subscribe(topic, 1);
-    topic_ota(topic, sizeof(topic), cfg_.device_uid);
-    impl_->bridge.subscribe(topic, 1);
+    topic_cmd_exec(topic, sizeof(topic), _cfg.device_uid);
+    impl->bridge.subscribe(topic, 1);
+    topic_ota(topic, sizeof(topic), _cfg.device_uid);
+    impl->bridge.subscribe(topic, 1);
 
     ESP_LOGI(TAG, "connected; subscribed to cmd/exec and ota");
     report_stat();
 
-    if (conn_cb_ != nullptr) {
-        conn_cb_(true, conn_ctx_);
+    if (conn_cb != nullptr) {
+        conn_cb(true, conn_ctx);
     }
 }
 
 void soulcloud::soulcloud_client::on_mqtt_disconnected()
 {
-    connected_ = false;
-    if (conn_cb_ != nullptr) {
-        conn_cb_(false, conn_ctx_);
+    connected = false;
+    if (conn_cb != nullptr) {
+        conn_cb(false, conn_ctx);
     }
 }
 
 void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_len,
                                     const uint8_t *data, size_t data_len)
 {
-    if (impl_ == nullptr || impl_->inbound_rb_ == nullptr) {
+    if (impl == nullptr || impl->inbound_rb == nullptr) {
         return;
     }
 
@@ -443,11 +452,11 @@ void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_l
     char expected[160] = {};
 
     client_impl::inbound_kind kind = client_impl::INBOUND_NONE;
-    topic_cmd_exec(expected, sizeof(expected), cfg_.device_uid);
+    topic_cmd_exec(expected, sizeof(expected), _cfg.device_uid);
     if (topic_matches(topic, topic_len, expected)) {
         kind = client_impl::INBOUND_CMD;
     } else {
-        topic_ota(expected, sizeof(expected), cfg_.device_uid);
+        topic_ota(expected, sizeof(expected), _cfg.device_uid);
         if (topic_matches(topic, topic_len, expected)) {
             kind = client_impl::INBOUND_OTA;
         }
@@ -480,7 +489,7 @@ void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_l
 
     // bounded wait for a free slot (backpressure); drop when full
     // (QoS1 redelivery covers commands, the server re-issues OTA notices)
-    if (xRingbufferSend(impl_->inbound_rb_, item, item_len, pdMS_TO_TICKS(100)) != pdTRUE) {
+    if (xRingbufferSend(impl->inbound_rb, item, item_len, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGW(TAG, "inbound ring buffer full; dropping %u-byte message", (unsigned)data_len);
     }
     heap_caps_free(item);
@@ -498,8 +507,8 @@ void soulcloud::soulcloud_client::dispatch_command(const uint8_t *payload, size_
                                                             result_buf, sizeof(result_buf));
     if (n > 0) {
         char topic[160] = {};
-        topic_cmd_result(topic, sizeof(topic), cfg_.device_uid);
-        impl_->bridge.publish(topic, result_buf, (size_t)n, 1);
+        topic_cmd_result(topic, sizeof(topic), _cfg.device_uid);
+        impl->bridge.publish(topic, result_buf, (size_t)n, 1);
     } else {
         ESP_LOGW(TAG, "cmd/exec dispatch failed (%ld)", (long)n);
     }
@@ -521,7 +530,7 @@ void soulcloud::soulcloud_client::handle_ota_notice(const uint8_t *payload, size
 
 void soulcloud::soulcloud_client::notify_wifi_connected()
 {
-    if (impl_ != nullptr) {
-        impl_->bridge.notify_wifi_connected();
+    if (impl != nullptr) {
+        impl->bridge.notify_wifi_connected();
     }
 }

@@ -30,53 +30,53 @@ using namespace soulcloud;
 
 soulcloud::msgpack_reader::msgpack_reader(const uint8_t *data, size_t len)
 {
-    mpack_reader_init_data(&r_, (const char *)data, len);
+    mpack_reader_init_data(&r, (const char *)data, len);
 }
 
 soulcloud::msgpack_reader::~msgpack_reader()
 {
-    mpack_reader_destroy(&r_);
+    mpack_reader_destroy(&r);
 }
 
 mpack_type_t soulcloud::msgpack_reader::peek_type()
 {
-    mpack_tag_t tag = mpack_peek_tag(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    mpack_tag_t tag = mpack_peek_tag(&r);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
     return mpack_tag_type(&tag);
 }
 
 uint32_t soulcloud::msgpack_reader::expect_map()
 {
-    const uint32_t n = mpack_expect_map(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    const uint32_t n = mpack_expect_map(&r);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
     return n;
 }
 
 uint32_t soulcloud::msgpack_reader::expect_array()
 {
-    const uint32_t n = mpack_expect_array(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    const uint32_t n = mpack_expect_array(&r);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
     return n;
 }
 
 uint64_t soulcloud::msgpack_reader::expect_u64()
 {
-    const uint64_t v = mpack_expect_u64(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    const uint64_t v = mpack_expect_u64(&r);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
     return v;
 }
 
 int64_t soulcloud::msgpack_reader::expect_int()
 {
-    const int64_t v = mpack_expect_int(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    const int64_t v = mpack_expect_int(&r);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
     return v;
 }
 
 int32_t soulcloud::msgpack_reader::expect_int32()
 {
-    const int64_t v = mpack_expect_int(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    const int64_t v = mpack_expect_int(&r);
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
         return 0;
     }
@@ -89,133 +89,133 @@ int32_t soulcloud::msgpack_reader::expect_int32()
 
 bool soulcloud::msgpack_reader::expect_bool()
 {
-    const bool v = mpack_expect_bool(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    const bool v = mpack_expect_bool(&r);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
     return v;
 }
 
 void soulcloud::msgpack_reader::expect_nil()
 {
-    mpack_expect_nil(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    mpack_expect_nil(&r);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
 }
 
 double soulcloud::msgpack_reader::expect_float()
 {
-    mpack_tag_t tag = mpack_peek_tag(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    mpack_tag_t tag = mpack_peek_tag(&r);
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
         return 0.0;
     }
     double v = 0.0;
     switch (mpack_tag_type(&tag)) {
     case mpack_type_float:
-        v = mpack_expect_float(&r_);
+        v = mpack_expect_float(&r);
         break;
     case mpack_type_double:
-        v = mpack_expect_double(&r_);
+        v = mpack_expect_double(&r);
         break;
     default:
         fail(ERR_TYPE);
         return 0.0;
     }
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
     return v;
 }
 
 int32_t soulcloud::msgpack_reader::read_key(char *buf, size_t cap, size_t *out_len)
 {
-    mpack_tag_t tag = mpack_read_tag(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    mpack_tag_t tag = mpack_read_tag(&r);
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
-        return err_;
+        return ret;
     }
     if (mpack_tag_type(&tag) != mpack_type_str) {
         fail(ERR_TYPE);
-        return err_;
+        return ret;
     }
     const size_t n = mpack_tag_str_length(&tag);
     if (n >= cap) {
         fail(ERR_OVERFLOW);
-        return err_;
+        return ret;
     }
-    mpack_read_bytes(&r_, buf, n);
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    mpack_read_bytes(&r, buf, n);
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
-        return err_;
+        return ret;
     }
     buf[n] = '\0';
     *out_len = n;
-    return err_;
+    return ret;
 }
 
 int32_t soulcloud::msgpack_reader::read_str(const char **ptr, uint32_t *len, uint32_t max_len)
 {
-    mpack_tag_t tag = mpack_read_tag(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    mpack_tag_t tag = mpack_read_tag(&r);
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
-        return err_;
+        return ret;
     }
     if (mpack_tag_type(&tag) != mpack_type_str) {
         fail(ERR_TYPE);
-        return err_;
+        return ret;
     }
     const size_t n = mpack_tag_str_length(&tag);
     if (n > max_len) {
         fail(ERR_OVERFLOW);
-        return err_;
+        return ret;
     }
-    *ptr = mpack_read_bytes_inplace(&r_, n);
+    *ptr = mpack_read_bytes_inplace(&r, n);
     *len = (uint32_t)n;
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
-        return err_;
+        return ret;
     }
-    return err_;
+    return ret;
 }
 
 int32_t soulcloud::msgpack_reader::read_bin(const uint8_t **ptr, uint32_t *len, uint32_t max_len)
 {
-    mpack_tag_t tag = mpack_read_tag(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    mpack_tag_t tag = mpack_read_tag(&r);
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
-        return err_;
+        return ret;
     }
     if (mpack_tag_type(&tag) != mpack_type_bin) {
         fail(ERR_TYPE);
-        return err_;
+        return ret;
     }
     const size_t n = mpack_tag_bin_length(&tag);
     if (n > max_len) {
         fail(ERR_OVERFLOW);
-        return err_;
+        return ret;
     }
-    *ptr = (const uint8_t *)mpack_read_bytes_inplace(&r_, n);
+    *ptr = (const uint8_t *)mpack_read_bytes_inplace(&r, n);
     *len = (uint32_t)n;
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
-        return err_;
+        return ret;
     }
-    return err_;
+    return ret;
 }
 
 void soulcloud::msgpack_reader::skip_value()
 {
-    mpack_discard(&r_);
-    if (mpack_reader_error(&r_) != mpack_ok) fail(ERR_BAD_MSG);
+    mpack_discard(&r);
+    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
 }
 
 int32_t soulcloud::msgpack_reader::finish()
 {
-    if (err_ != ERR_OK) return err_;
-    if (mpack_reader_error(&r_) != mpack_ok) {
+    if (ret != ERR_OK) return ret;
+    if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
-        return err_;
+        return ret;
     }
-    if (mpack_reader_remaining(&r_, NULL) != 0) {
+    if (mpack_reader_remaining(&r, NULL) != 0) {
         fail(ERR_BAD_MSG);
     }
-    return err_;
+    return ret;
 }
 
 // ------------------------------------------------------------------ //
@@ -224,115 +224,115 @@ int32_t soulcloud::msgpack_reader::finish()
 
 soulcloud::msgpack_writer::msgpack_writer(uint8_t *buf, size_t cap)
 {
-    mpack_writer_init(&w_, (char *)buf, cap);
+    mpack_writer_init(&w, (char *)buf, cap);
 }
 
 soulcloud::msgpack_writer::~msgpack_writer()
 {
-    if (!destroyed_) {
-        mpack_writer_destroy(&w_);
-        destroyed_ = true;
+    if (!destroyed) {
+        mpack_writer_destroy(&w);
+        destroyed = true;
     }
 }
 
 void soulcloud::msgpack_writer::start_map(uint32_t count)
 {
-    if (err_ != ERR_OK) return;
-    mpack_start_map(&w_, count);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_start_map(&w, count);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::finish_map()
 {
-    if (err_ != ERR_OK) return;
-    mpack_finish_map(&w_);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_finish_map(&w);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::start_array(uint32_t count)
 {
-    if (err_ != ERR_OK) return;
-    mpack_start_array(&w_, count);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_start_array(&w, count);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::finish_array()
 {
-    if (err_ != ERR_OK) return;
-    mpack_finish_array(&w_);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_finish_array(&w);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_str(const char *s)
 {
-    if (err_ != ERR_OK) return;
-    mpack_write_cstr(&w_, s);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_write_cstr(&w, s);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_str(const char *s, size_t len)
 {
-    if (err_ != ERR_OK) return;
-    mpack_write_str(&w_, s, len);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_write_str(&w, s, len);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_bin(const void *data, size_t len)
 {
-    if (err_ != ERR_OK) return;
-    mpack_write_bin(&w_, (const char *)data, len);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_write_bin(&w, (const char *)data, len);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_uint(uint64_t v)
 {
-    if (err_ != ERR_OK) return;
-    mpack_write_uint(&w_, v);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_write_uint(&w, v);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_int(int64_t v)
 {
-    if (err_ != ERR_OK) return;
-    mpack_write_int(&w_, v);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_write_int(&w, v);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_nil()
 {
-    if (err_ != ERR_OK) return;
-    mpack_write_nil(&w_);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_write_nil(&w);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_bool(bool v)
 {
-    if (err_ != ERR_OK) return;
-    mpack_write_bool(&w_, v);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_write_bool(&w, v);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_double(double v)
 {
-    if (err_ != ERR_OK) return;
-    mpack_write_double(&w_, v);
-    if (mpack_writer_error(&w_) != mpack_ok) fail(ERR_OVERFLOW);
+    if (ret != ERR_OK) return;
+    mpack_write_double(&w, v);
+    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
 }
 
 size_t soulcloud::msgpack_writer::bytes_written()
 {
-    return mpack_writer_buffer_used(&w_);
+    return mpack_writer_buffer_used(&w);
 }
 
 int32_t soulcloud::msgpack_writer::finish()
 {
-    if (destroyed_) return err_;
-    if (err_ == ERR_OK && mpack_writer_error(&w_) != mpack_ok) {
+    if (destroyed) return ret;
+    if (ret == ERR_OK && mpack_writer_error(&w) != mpack_ok) {
         fail(ERR_OVERFLOW);
     }
-    mpack_writer_destroy(&w_);
-    destroyed_ = true;
-    return err_;
+    mpack_writer_destroy(&w);
+    destroyed = true;
+    return ret;
 }
 
 // ------------------------------------------------------------------ //

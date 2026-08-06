@@ -69,7 +69,7 @@ namespace soulcloud
         esp_err_t stop();
 
         /** @return true while the MQTT session is established. */
-        bool is_connected() const { return connected_; }
+        bool is_connected() const { return connected; }
 
         /**
          * @brief Subscribe to a topic at the given QoS.
@@ -100,11 +100,11 @@ namespace soulcloud
         void notify_wifi_connected();
 
     private:
-        esp_mqtt_client_handle_t client_ = nullptr;
-        esp_mqtt_client_config_t mqtt_cfg_ = {};
-        bool started_ = false;
-        bool connected_ = false;
-        mqtt_callbacks cbs_ = {};
+        esp_mqtt_client_handle_t client = nullptr;
+        esp_mqtt_client_config_t mqtt_cfg = {};
+        bool started = false;
+        bool connected = false;
+        mqtt_callbacks _cbs = {};
 
         static constexpr char TAG[] = "soulcloud_mqtt";
 

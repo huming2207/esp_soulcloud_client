@@ -65,7 +65,7 @@ namespace soulcloud
         void deinit();
 
         /** @brief True while an OTA download/flash is in progress. */
-        bool is_active() const { return active_; }
+        bool is_active() const { return active; }
 
         /**
          * @brief Start the OTA flow for a validated notice.
@@ -98,10 +98,10 @@ namespace soulcloud
             const char *msg;
         };
 
-        const config *cfg_ = nullptr;
-        mqtt_bridge *bridge_ = nullptr;
-        TaskHandle_t task_ = nullptr;
-        volatile bool active_ = false;
+        const config *_cfg = nullptr;
+        mqtt_bridge *_bridge = nullptr;
+        TaskHandle_t task = nullptr;
+        volatile bool active = false;
 
         // the notice under execution (single in-flight OTA at a time)
         struct notice_copy
@@ -113,7 +113,7 @@ namespace soulcloud
             char download_url[192];
             char download_token[512];
         };
-        notice_copy pending_ = {};
+        notice_copy pending = {};
 
         void run();
         bool download_and_verify(esp_ota_handle_t *ota_handle_out,

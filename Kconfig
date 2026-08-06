@@ -99,6 +99,18 @@ menu "Soulcloud client"
             esp_timer task stacks (defaults 6144/3584 bytes). The task is
             allocated from PSRAM when available.
 
+    config SOULCLOUD_LOG_RB_SIZE
+        int "Log ring buffer size (bytes)"
+        default 16384
+        range 4096 65536
+        help
+            FreeRTOS ring buffer between the on9log sink (producer, runs
+            on the log source's task) and the core dispatch task
+            (consumer, publishes to MQTT with throttling). The sink
+            enqueues with a zero-tick wait, so a full buffer simply drops
+            the packet (logs are lossy telemetry). Allocated from PSRAM
+            when available.
+
     config SOULCLOUD_INBOUND_MAX
         int "Inbound command/OTA payload buffer (bytes)"
         default 4096

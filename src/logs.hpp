@@ -9,16 +9,14 @@
  * are dropped silently (on9log core tracks its own overflow separately).
  *
  * Design notes:
- *  - Synchronous pass-through: sink callbacks run on the calling task of
- *    the log source (task-context ON9_LOGx, or the ISR drain task for
- *    ON9_ISR_LOGx), and publish immediately. There is deliberately no
- *    queue/ringbuffer between the sink and MQTT: logs are lossy
- *    telemetry, and buffering would add a second overflow semantics on
- *    top of the core's DROPPED accounting. The core's own ISR ringbuffer
- *    is the rate-mismatch buffer.
- *  - Publish is non-blocking for the caller (esp_mqtt_client_publish
- *    enqueues); the QoS 0 packet is dropped if the transport is busy or
- *    the throttle is exceeded.
+ *  - Producer/consumer split: sink callbacks (running on the log source's
+ *    task) only assemble the packet and enqueue it into a FreeRTOS ring
+ *    buffer with a zero-tick wait (full buffer = drop, logs are lossy
+ *    telemetry). The soulcloud core task consumes the ring buffer and
+ *    publishes with throttling, so MQTT work never blocks the log
+ *    producer and a burst is drained in order.
+ *  - on9log core's own ISR ringbuffer remains the rate-mismatch buffer
+ *    between ISR log sources and the drain task.
  *
  * The UART/VFS sink (on9log_esp_vfs) can stay registered in parallel for
  * local debugging; both sinks receive the same packets.
@@ -31,6 +29,7 @@
 #include <cstdint>
 
 #include <freertos/FreeRTOS.h>
+#include <freertos/ringbuf.h>
 #include <freertos/semphr.h>
 #include <on9log.h>
 
@@ -53,18 +52,20 @@ namespace soulcloud
         log_sender &operator=(const log_sender &) = delete;
 
         /**
-         * Installs the on9log -> MQTT sink.
+         * Installs the on9log -> MQTT sink (producer side).
          *
-         * @param cfg    Immutable configuration (borrowed, NOT copied); the
-         *               caller must keep it alive for the lifetime of this
-         *               singleton. Used for the uplink throttle
-         *               (cfg->log_rate_per_s) and the publish topic
-         *               (cfg->device_uid).
-         * @param bridge MQTT bridge (borrowed, must outlive the sink);
-         *               publishes go through bridge->publish().
+         * @param cfg     Immutable configuration (borrowed, NOT copied); the
+         *                caller must keep it alive for the lifetime of this
+         *                singleton. Used for the uplink throttle
+         *                (cfg->log_rate_per_s) and the publish topic
+         *                (cfg->device_uid).
+         * @param bridge  MQTT bridge (borrowed, must outlive the sink);
+         *                publishes go through bridge->publish() from
+         *                drain().
          * @return ESP_OK on success; ESP_ERR_INVALID_STATE if already
-         *         installed; ESP_ERR_NO_MEM if the static mutex could not
-         *         be created; ESP_FAIL if the on9log sink table is full.
+         *         installed; ESP_ERR_NO_MEM if the mutex or the log ring
+         *         buffer could not be created; ESP_FAIL if the on9log
+         *         sink table is full.
          *
          * @note Safe to call once from the app init path. The sink
          *       callbacks run on the log source's calling task and take a
@@ -76,27 +77,38 @@ namespace soulcloud
         /** Removes the sink (idempotent). */
         void deinit();
 
+        /**
+         * Drains the log ring buffer and publishes queued packets
+         * (consumer side, throttled to cfg->log_rate_per_s).
+         *
+         * @note Must be called from the soulcloud core task (or any task
+         *       other than the sink callbacks); uses a zero-tick receive,
+         *       so it never blocks.
+         */
+        void drain();
+
     private:
         log_sender() = default;
 
         static constexpr char TAG[] = "soulcloud_log";
         static constexpr uint32_t PACKET_MAX = 4096;  // max assembled packet
 
-        const config *cfg_ = nullptr;
-        mqtt_bridge *bridge_ = nullptr;
-        SemaphoreHandle_t sink_mutex_ = nullptr;
-        StaticSemaphore_t sink_mutex_storage_ = {};
+        const config *_cfg = nullptr;
+        mqtt_bridge *_bridge = nullptr;
+        SemaphoreHandle_t _sink_mutex = nullptr;
+        StaticSemaphore_t _sink_mutex_storage = {};
+        RingbufHandle_t log_rb = nullptr;  // producer -> consumer queue
         // Long-lived sink descriptor handed to on9log (the core keeps the
         // pointer, not a copy).
-        on9log_sink_t sink_ = {};
+        on9log_sink_t _sink = {};
 
-        uint8_t packet_[PACKET_MAX];
-        size_t packet_len_ = 0;
-        bool packet_active_ = false;
-        bool overflow_ = false;
+        uint8_t packet[PACKET_MAX];
+        size_t packet_len = 0;
+        bool packet_active = false;
+        bool overflow = false;
 
-        uint64_t last_sent_us_ = 0;
-        uint32_t dropped_count_ = 0;
+        uint64_t last_sent_us = 0;
+        uint32_t dropped_count = 0;
 
         static void sink_start(const uint8_t *header, size_t header_len, void *ctx);
         static void sink_payload(const uint8_t *payload, size_t payload_len,

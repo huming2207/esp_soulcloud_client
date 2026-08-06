@@ -100,10 +100,10 @@ namespace soulcloud
         static constexpr uint32_t MAX_COMMANDS = 16;
         static constexpr uint32_t RECENT_CACHE = 8;
 
-        command_entry entries_[MAX_COMMANDS];
-        uint32_t count_ = 0;
-        recent_entry recent_[RECENT_CACHE];
-        uint32_t recent_head_ = 0;
+        command_entry entries[MAX_COMMANDS];
+        uint32_t count = 0;
+        recent_entry recent[RECENT_CACHE];
+        uint32_t recent_head = 0;
 
         recent_entry *recent_find(const uint8_t *id);
         void recent_put(const uint8_t *id, int32_t code);

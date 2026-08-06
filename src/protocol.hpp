@@ -51,8 +51,8 @@ namespace soulcloud
      * @brief Strict, allocation-free MessagePack reader.
      *
      * Wraps mpack_reader_t over a caller-owned buffer. Every typed read
-     * validates the wire type; on the first error err() is latched and a
-     * safe default is returned — callers must check ok()/err().
+     * validates the wire type; on the first error .err() is latched and a
+     * safe default is returned — callers must check ok()/.err().
      */
     class msgpack_reader
     {
@@ -68,10 +68,10 @@ namespace soulcloud
         msgpack_reader &operator=(const msgpack_reader &) = delete;
 
         /** @return First error encountered, or ERR_OK. */
-        int32_t err() const { return err_; }
+        int32_t err() const { return ret; }
 
         /** @return true while no error has been latched. */
-        bool ok() const { return err_ == ERR_OK; }
+        bool ok() const { return ret == ERR_OK; }
 
         /**
          * @brief Type of the next value without consuming it.
@@ -79,7 +79,7 @@ namespace soulcloud
          */
         mpack_type_t peek_type();
 
-        // --- strict typed reads; on failure err() is set and a safe
+        // --- strict typed reads; on failure .err() is set and a safe
         //     default is returned (caller must check ok()) ---------------
 
         /** @brief Expects and returns a map header. */
@@ -145,7 +145,7 @@ namespace soulcloud
         void skip_value();
 
         /**
-         * @brief Verifies the whole payload was consumed and returns err().
+         * @brief Verifies the whole payload was consumed and returns .err().
          *
          * @note Must be called before the reader goes out of scope; the
          *       destructor alone does not validate trailing bytes.
@@ -153,12 +153,12 @@ namespace soulcloud
         int32_t finish();
 
     private:
-        mpack_reader_t r_;
-        int32_t err_ = ERR_OK;
+        mpack_reader_t r;
+        int32_t ret = ERR_OK;
 
         void fail(int32_t e)
         {
-            if (err_ == ERR_OK) err_ = e;
+            if (ret == ERR_OK) ret = e;
         }
     };
 
@@ -169,7 +169,7 @@ namespace soulcloud
     /**
      * @brief MessagePack writer over a fixed caller-owned buffer.
      *
-     * All writes are bounds-checked; on overflow err() is latched and
+     * All writes are bounds-checked; on overflow .err() is latched and
      * subsequent writes are no-ops. finish() must be called (or the
      * destructor runs) to validate and release the underlying writer.
      */
@@ -187,10 +187,10 @@ namespace soulcloud
         msgpack_writer &operator=(const msgpack_writer &) = delete;
 
         /** @return First error encountered, or ERR_OK. */
-        int32_t err() const { return err_; }
+        int32_t err() const { return ret; }
 
         /** @return true while no error has been latched. */
-        bool ok() const { return err_ == ERR_OK; }
+        bool ok() const { return ret == ERR_OK; }
 
         /** @brief Starts a map with count entries (call finish_map()). */
         void start_map(uint32_t count);
@@ -237,18 +237,18 @@ namespace soulcloud
 
         /**
          * @brief Finalises the writer (error check + destroy) and returns
-         *        err(). Idempotent; also called by the destructor.
+         *        .err(). Idempotent; also called by the destructor.
          */
         int32_t finish();
 
     private:
-        mpack_writer_t w_;
-        bool destroyed_ = false;
-        int32_t err_ = ERR_OK;
+        mpack_writer_t w;
+        bool destroyed = false;
+        int32_t ret = ERR_OK;
 
         void fail(int32_t e)
         {
-            if (err_ == ERR_OK) err_ = e;
+            if (ret == ERR_OK) ret = e;
         }
     };
 

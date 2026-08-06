@@ -230,7 +230,7 @@ namespace soulcloud
          * @brief Whether the MQTT session is currently established.
          * @return true when connected.
          */
-        bool is_connected() const { return connected_; }
+        bool is_connected() const { return connected; }
 
         /**
          * @brief Set the connection state callback.
@@ -240,8 +240,8 @@ namespace soulcloud
          */
         void set_connection_cb(connection_cb_t cb, void *ctx)
         {
-            conn_cb_ = cb;
-            conn_ctx_ = ctx;
+            conn_cb = cb;
+            conn_ctx = ctx;
         }
 
         /**
@@ -283,14 +283,14 @@ namespace soulcloud
         static constexpr uint32_t FW_SHA256_LEN = 32;  // raw SHA-256 bytes
 
         class client_impl;  // PIMPL: mqtt_bridge + esp_timer (see soulcloud.cpp)
-        client_impl *impl_ = nullptr;
+        client_impl *impl = nullptr;
 
-        config cfg_ = {};
-        bool inited_ = false;
-        bool started_ = false;
-        bool connected_ = false;
-        connection_cb_t conn_cb_ = nullptr;
-        void *conn_ctx_ = nullptr;
+        config _cfg = {};
+        bool inited = false;
+        bool started = false;
+        bool connected = false;
+        connection_cb_t conn_cb = nullptr;
+        void *conn_ctx = nullptr;
 
         void on_mqtt_connected();
         void on_mqtt_disconnected();
