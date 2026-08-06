@@ -145,11 +145,13 @@ namespace soulcloud
      *       task and blocks the whole MQTT stack while executing.
      *
      * @param[in]  cmd Decoded `cmd/exec` (payload views valid for the call).
-     * @param[out] out Result to encode; args may reference cmd or static
-     *                 storage (encoded before the call returns).
+     * @param[out] out Result to encode; args may reference cmd or storage
+     *                 reachable from ctx (encoded before the call returns).
+     * @param[in]  ctx Opaque user context from register_command() (may be
+     *                 NULL); typically points at per-command state.
      * @return ESP_OK on handled; a non-OK value maps to result code -2.
      */
-    typedef esp_err_t (*command_handler_t)(const command_exec *cmd, command_result *out);
+    typedef esp_err_t (*command_handler_t)(const command_exec *cmd, command_result *out, void *ctx);
 
     // ------------------------------------------------------------------ //
     // client lifecycle
@@ -249,12 +251,14 @@ namespace soulcloud
          * @param[in] name    Command name; the registry keeps the POINTER,
          *                    so it must be static or outlive the registry.
          * @param[in] handler Handler to invoke for this command.
+         * @param[in] ctx     Opaque user context passed to the handler on
+         *                    every dispatch (may be NULL).
          * @return
          *  - ESP_OK
          *  - ESP_ERR_INVALID_ARG if name/handler is NULL or name empty
          *  - ESP_ERR_NO_MEM      if the registry is full
          */
-        esp_err_t register_command(const char *name, command_handler_t handler);
+        esp_err_t register_command(const char *name, command_handler_t handler, void *ctx = nullptr);
 
         /**
          * @brief Report stat immediately (also sent on every connect).

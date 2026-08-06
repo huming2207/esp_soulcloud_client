@@ -230,9 +230,9 @@ esp_err_t soulcloud::soulcloud_client::deinit()
 // commands
 // ------------------------------------------------------------------ //
 
-esp_err_t soulcloud::soulcloud_client::register_command(const char *name, command_handler_t handler)
+esp_err_t soulcloud::soulcloud_client::register_command(const char *name, command_handler_t handler, void *ctx)
 {
-    return soulcloud::command_registry::instance().register_command(name, handler);
+    return soulcloud::command_registry::instance().register_command(name, handler, ctx);
 }
 
 // ------------------------------------------------------------------ //

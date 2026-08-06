@@ -12,7 +12,7 @@
 
 using namespace soulcloud;
 
-esp_err_t soulcloud::command_registry::register_command(const char *name, command_handler_t handler)
+esp_err_t soulcloud::command_registry::register_command(const char *name, command_handler_t handler, void *ctx)
 {
     if (name == nullptr || name[0] == '\0' || handler == nullptr) {
         return ESP_ERR_INVALID_ARG;
@@ -20,6 +20,7 @@ esp_err_t soulcloud::command_registry::register_command(const char *name, comman
     for (uint32_t i = 0; i < count_; ++i) {
         if (strcmp(entries_[i].name, name) == 0) {
             entries_[i].handler = handler;  // replace
+            entries_[i].ctx = ctx;
             return ESP_OK;
         }
     }
@@ -29,6 +30,7 @@ esp_err_t soulcloud::command_registry::register_command(const char *name, comman
     }
     entries_[count_].name = name;
     entries_[count_].handler = handler;
+    entries_[count_].ctx = ctx;
     count_++;
     return ESP_OK;
 }
@@ -81,10 +83,12 @@ int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len
 
     // find the handler
     command_handler_t handler = nullptr;
+    void *ctx = nullptr;
     for (uint32_t i = 0; i < count_; ++i) {
         const size_t nlen = strlen(entries_[i].name);
         if (nlen == exec.cmd_len && memcmp(entries_[i].name, exec.cmd, nlen) == 0) {
             handler = entries_[i].handler;
+            ctx = entries_[i].ctx;
             break;
         }
     }
@@ -99,7 +103,7 @@ int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len
                    : ERR_OVERFLOW;
     }
 
-    const esp_err_t err = handler(&exec, &result);
+    const esp_err_t err = handler(&exec, &result, ctx);
     result.code = (err == ESP_OK) ? result.code : -2;  // internal error
     recent_put(exec.id, result.code);
 

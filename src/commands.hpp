@@ -51,12 +51,14 @@ namespace soulcloud
          * @param[in] name    Command name; the registry keeps the POINTER,
          *                    so it must be static or outlive the registry.
          * @param[in] handler Handler invoked for this command.
+         * @param[in] ctx     Opaque user context passed to the handler on
+         *                    every dispatch (may be NULL).
          * @return
          *  - ESP_OK
          *  - ESP_ERR_INVALID_ARG if name/handler is NULL or name empty
          *  - ESP_ERR_NO_MEM      if the registry is full
          */
-        esp_err_t register_command(const char *name, command_handler_t handler);
+        esp_err_t register_command(const char *name, command_handler_t handler, void *ctx = nullptr);
 
         /**
          * @brief Decode a `cmd/exec` payload, dispatch to the handler and
@@ -85,6 +87,7 @@ namespace soulcloud
         {
             const char *name;
             command_handler_t handler;
+            void *ctx;  // opaque user context, passed to the handler
         };
 
         struct recent_entry
