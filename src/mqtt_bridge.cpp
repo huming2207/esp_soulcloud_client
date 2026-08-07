@@ -24,6 +24,11 @@ esp_err_t soulcloud::mqtt_bridge::init(const config *cfg, const mqtt_callbacks *
     mqtt_cfg.credentials.authentication.password = cfg->device_password;
     mqtt_cfg.session.keepalive = (int)cfg->mqtt_keepalive_s;
     mqtt_cfg.session.protocol_ver = MQTT_PROTOCOL_V_3_1_1;
+    // Persistent session: QoS1 messages addressed while the device is
+    // briefly offline (commands, OTA notices) are re-delivered after a
+    // reconnect instead of being lost, which makes notice delivery
+    // robust against short connection drops.
+    mqtt_cfg.session.disable_clean_session = true;
     mqtt_cfg.buffer.size = (int)cfg->mqtt_buffer_in;
     mqtt_cfg.buffer.out_size = (int)cfg->mqtt_buffer_out;
     mqtt_cfg.network.reconnect_timeout_ms = (int)cfg->mqtt_reconnect_timeout_ms;
