@@ -44,6 +44,28 @@ esp_err_t soulcloud::ota_executor::init(const config *cfg, mqtt_bridge *bridge)
 
 void soulcloud::ota_executor::deinit()
 {
+    // An in-flight OTA task dereferences _cfg/_bridge on every state
+    // report and exit path; wait for it (bounded) before releasing them.
+    // The download itself is bounded by the HTTP timeout, so a live task
+    // normally ends within ota_timeout_s; the forced delete below is a
+    // last resort that leaks the HTTP/OTA handles but is safe against
+    // NULL derefs (and deinit is a terminating operation anyway).
+    if (task != nullptr) {
+        const uint32_t budget_ms =
+            1000u + (uint32_t)(_cfg != nullptr ? _cfg->ota_timeout_s : 0) * 1000u;
+        uint32_t waited = 0;
+        while (task != nullptr && waited < budget_ms) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            waited += 10;
+        }
+        if (task != nullptr) {
+            ESP_LOGW(TAG, "OTA task still running after %lu ms; force-deleting",
+                     (unsigned long)budget_ms);
+            vTaskDelete(task);
+        }
+        task = nullptr;
+    }
+    active = false;
     _cfg = nullptr;
     _bridge = nullptr;
 }
@@ -100,12 +122,14 @@ esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
     snprintf(pending.download_token, sizeof(pending.download_token), "%s", notice->download_token);
 
     active = true;
+    TaskHandle_t created_task = nullptr;
     const BaseType_t created = xTaskCreate(task_trampoline, "soulcloud_ota",
-                                           TASK_STACK, this, TASK_PRIORITY, &task);
+                                           TASK_STACK, this, TASK_PRIORITY, &created_task);
     if (created != pdPASS) {
         active = false;
         return ESP_ERR_NO_MEM;
     }
+    task = created_task;
     return ESP_OK;
 }
 

@@ -61,7 +61,17 @@ namespace soulcloud
          */
         esp_err_t init(const config *cfg, mqtt_bridge *bridge);
 
-        /** @brief Forget cfg/bridge (idempotent). */
+        /**
+         * @brief Release cfg/bridge (idempotent).
+         *
+         * Waits (bounded) for an in-flight OTA task to finish before
+         * releasing the pointers it dereferences: the task reports its
+         * state through the bridge and reads the config on every exit
+         * path, so freeing them under it used to be a NULL deref. If the
+         * task is still alive after the wait (e.g. a stuck download), it
+         * is force-deleted; the HTTP/OTA handles it held are leaked but
+         * nothing dereferences freed pointers.
+         */
         void deinit();
 
         /** @brief True while an OTA download/flash is in progress. */
@@ -100,7 +110,7 @@ namespace soulcloud
 
         const config *_cfg = nullptr;
         mqtt_bridge *_bridge = nullptr;
-        TaskHandle_t task = nullptr;
+        volatile TaskHandle_t task = nullptr;
         volatile bool active = false;
 
         // the notice under execution (single in-flight OTA at a time)
