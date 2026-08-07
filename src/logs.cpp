@@ -167,12 +167,13 @@ void soulcloud::log_sender::drain()
     }
 
     // Drop visibility: surface accumulated drops as a WARN packet through
-    // the normal log path (throttled to one per second). The notification
-    // is emitted with drop_notify_inflight set so its own ring-buffer
-    // drop is not counted and it cannot re-trigger itself; a later
-    // throttle/disconnect drop of the notification simply counts again
-    // and the next WARN reports the new total.
-    if (dropped_count > 0 && !drop_notify_inflight) {
+    // the normal log path (throttled to one per second, only while the
+    // uplink is connected). The notification is emitted with
+    // drop_notify_inflight set so its own ring-buffer drop is not counted
+    // and it cannot re-trigger itself; while disconnected no notification
+    // is emitted at all (the platform already sees the disconnect), and
+    // the accumulated count is reported once on reconnect.
+    if (dropped_count > 0 && !drop_notify_inflight && _bridge->is_connected()) {
         const uint64_t now = (uint64_t)esp_timer_get_time();
         if (now - last_drop_notify_us >= 1000000ull) {
             drop_notify_inflight = true;
