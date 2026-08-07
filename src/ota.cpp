@@ -95,6 +95,51 @@ void soulcloud::ota_executor::store_last_ota(const char *release_id)
     nvs_close(h);
 }
 
+void soulcloud::ota_executor::store_pending_ota(const char *release_id)
+{
+    nvs_handle_t h = 0;
+    if (nvs_open("soulcloud", NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    if (nvs_set_str(h, NVS_KEY_PENDING_REL, release_id) == ESP_OK) {
+        nvs_commit(h);
+    }
+    nvs_close(h);
+}
+
+void soulcloud::ota_executor::finalize_pending_ota()
+{
+    nvs_handle_t h = 0;
+    if (nvs_open("soulcloud", NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    char pending_rel[37] = {};
+    size_t len = sizeof(pending_rel);
+    if (nvs_get_str(h, NVS_KEY_PENDING_REL, pending_rel, &len) != ESP_OK) {
+        nvs_close(h);
+        return;  // nothing pending (also the common case)
+    }
+    // Cancel the bootloader rollback when this image was booted as
+    // PENDING_VERIFY (rollback-enabled builds); with no rollback enabled
+    // the state is not PENDING_VERIFY and the promotion below is plain.
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (running != nullptr &&
+        esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY &&
+        esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
+        ESP_LOGW(TAG, "mark app valid failed; keeping release pending");
+        nvs_close(h);
+        return;  // retried on the next connect
+    }
+    // Promote: ota_rel = pending, erase pending.
+    nvs_set_str(h, NVS_KEY_LAST_REL, pending_rel);
+    nvs_erase_key(h, NVS_KEY_PENDING_REL);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "release %s validated on first boot", pending_rel);
+}
+
 esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
 {
     if (_cfg == nullptr || _bridge == nullptr || active) {
@@ -345,7 +390,12 @@ void soulcloud::ota_executor::run()
         return;
     }
 
-    store_last_ota(pending.release_id);
+    // The release id is only *pending* until the new firmware's first
+    // successful boot validates it (finalize_pending_ota on first MQTT
+    // connect): writing the dedupe key before the restart would mark a
+    // release as applied even when the bootloader rolls the new image
+    // back, and the release could never be re-delivered.
+    store_pending_ota(pending.release_id);
     report_state("installed", 0, nullptr);
     ESP_LOGI(TAG, "OTA installed; restarting");
 

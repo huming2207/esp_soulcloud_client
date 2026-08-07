@@ -74,6 +74,24 @@ namespace soulcloud
          */
         void deinit();
 
+        /**
+         * @brief First-boot self-check: promote the pending OTA release.
+         *
+         * Called once the device reaches a healthy state (first MQTT
+         * connect). When a release was installed and the device
+         * restarted, the release id is only a *pending* candidate in NVS;
+         * this call cancels the bootloader rollback (rollback-enabled
+         * builds) and promotes it to the dedupe key. If the new firmware
+         * never boots far enough to connect, the bootloader rolls back
+         * and the old firmware never saw the release as applied, so a
+         * redelivered notice triggers a fresh OTA instead of being
+         * ignored forever.
+         *
+         * Idempotent: after a successful promotion the pending key is
+         * gone. Safe to call on every connect.
+         */
+        void finalize_pending_ota();
+
         /** @brief True while an OTA download/flash is in progress. */
         bool is_active() const { return active; }
 
@@ -101,6 +119,7 @@ namespace soulcloud
         static constexpr uint32_t TASK_PRIORITY = 5;
         static constexpr size_t CHUNK = 4096;
         static constexpr char NVS_KEY_LAST_REL[] = "ota_rel";
+        static constexpr char NVS_KEY_PENDING_REL[] = "ota_pend";
 
         struct ota_fail
         {
@@ -132,6 +151,7 @@ namespace soulcloud
         void report_state(const char *state, int32_t code, const char *message);
         bool last_ota_matches(const char *release_id) const;
         void store_last_ota(const char *release_id);
+        void store_pending_ota(const char *release_id);
 
         static void task_trampoline(void *ctx);
     };

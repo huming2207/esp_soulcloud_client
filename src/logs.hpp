@@ -21,8 +21,16 @@
  * The UART/VFS sink (on9log_esp_vfs) can stay registered in parallel for
  * local debugging; both sinks receive the same packets.
  *
+ * Drop visibility: when packets are dropped device-side (ring buffer
+ * full, throttle, or disconnected MQTT) a WARN packet is emitted through
+ * on9log at most once per second, so the backend can tell "device logged
+ * nothing" from "device dropped logs" (which the platform cannot see
+ * otherwise). The notification itself is not counted as a drop (re-entrancy
+ * guard), and its own ring-buffer drop is suppressed so it cannot trigger
+ * another notification.
+ *
  * Memory rules: one static 4 KiB reassembly buffer; the mutex uses static
- * storage. No heap allocation, no queue, no task.
+ * storage; the ring buffer is heap-allocated once in init().
  */
 
 #include <cstddef>
@@ -109,6 +117,8 @@ namespace soulcloud
 
         uint64_t last_sent_us = 0;
         uint32_t dropped_count = 0;
+        bool drop_notify_inflight = false;  // re-entrancy guard for the drop WARN
+        uint64_t last_drop_notify_us = 0;    // throttle: at most one WARN per second
 
         static void sink_start(const uint8_t *header, size_t header_len, void *ctx);
         static void sink_payload(const uint8_t *payload, size_t payload_len,

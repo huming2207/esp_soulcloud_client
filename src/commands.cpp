@@ -60,11 +60,29 @@ int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len
     command_exec exec;
     const int32_t rc = decode_command_exec(payload, len, &exec);
     if (rc != ERR_OK) {
+        // Rejections must be visible to the platform: a command dropped
+        // device-side would otherwise hang until the platform timeout,
+        // with no way to tell "not received" from "rejected". Only
+        // possible when the id is extractable; a payload without a
+        // usable id cannot be answered at all.
+        uint8_t id[16] = {};
+        if (decode_command_id(payload, len, id) == ERR_OK) {
+            command_result result = {};
+            result.id = id;
+            result.seq = 0;
+            result.args = nullptr;
+            result.arg_count = 0;
+            result.code = CMD_RESULT_ERR_DECODE;
+            size_t out_len = 0;
+            return encode_command_result(out_buf, out_cap, &out_len, &result) == ERR_OK
+                       ? (int32_t)out_len
+                       : ERR_OVERFLOW;
+        }
         ESP_LOGW(TAG, "decode cmd/exec failed: %d", rc);
         return rc;
     }
 
-    command_result result;
+    command_result result = {};
     result.id = exec.id;
     result.seq = exec.seq;
     result.args = nullptr;

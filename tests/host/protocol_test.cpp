@@ -89,6 +89,69 @@ static void test_decode_command_exec()
     CHECK(ce.arg_count == 0, "arg_count == 0");
 }
 
+static void test_decode_command_id()
+{
+    printf("[decode command id (error-result extraction)]\n");
+    uint8_t buf[1024];
+    size_t len = 0;
+    uint8_t id[16] = {};
+
+    // golden fixture: id is the first key
+    CHECK(load_file("fixtures/cmd_exec.msgpack", buf, sizeof(buf), &len), "load cmd_exec fixture");
+    CHECK(decode_command_id(buf, len, id) == ERR_OK, "id extracted from golden fixture");
+    CHECK(memcmp(id, EXPECTED_ID, 16) == 0, "id bytes match");
+
+    // id in the middle, unknown/other keys before it (skip_value path)
+    {
+        msgpack_writer w(buf, sizeof(buf));
+        w.start_map(3);
+        w.write_str("cmd");
+        w.write_str("someLongCommandNameThatNobodyUses");
+        w.write_str("seq");
+        w.write_uint(7);
+        w.write_str("id");
+        w.write_bin(EXPECTED_ID, 16);
+        w.finish_map();
+        len = w.bytes_written();
+        CHECK(w.finish() == ERR_OK, "write id-last payload");
+        CHECK(decode_command_id(buf, len, id) == ERR_OK, "id extracted with other keys first");
+        CHECK(memcmp(id, EXPECTED_ID, 16) == 0, "id bytes match");
+    }
+
+    // not a map at all
+    {
+        msgpack_writer w(buf, sizeof(buf));
+        w.write_uint(42);
+        len = w.bytes_written();
+        CHECK(w.finish() == ERR_OK, "write non-map payload");
+        CHECK(decode_command_id(buf, len, id) == ERR_BAD_MSG, "non-map rejected");
+    }
+
+    // map without an id
+    {
+        msgpack_writer w(buf, sizeof(buf));
+        w.start_map(1);
+        w.write_str("cmd");
+        w.write_str("reboot");
+        w.finish_map();
+        len = w.bytes_written();
+        CHECK(w.finish() == ERR_OK, "write no-id payload");
+        CHECK(decode_command_id(buf, len, id) == ERR_MISSING_FIELD, "missing id reported");
+    }
+
+    // id of the wrong type
+    {
+        msgpack_writer w(buf, sizeof(buf));
+        w.start_map(1);
+        w.write_str("id");
+        w.write_str("notabinary");
+        w.finish_map();
+        len = w.bytes_written();
+        CHECK(w.finish() == ERR_OK, "write str-id payload");
+        CHECK(decode_command_id(buf, len, id) == ERR_TYPE, "non-bin id rejected");
+    }
+}
+
 static void test_encode_command_result()
 {
     printf("[encode cmd/result]\n");
@@ -419,6 +482,7 @@ int main(int argc, char **argv)
     }
     test_topic_helpers();
     test_decode_command_exec();
+    test_decode_command_id();
     test_encode_command_result();
     test_encode_stat();
     test_decode_ota_notice();

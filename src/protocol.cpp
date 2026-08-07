@@ -467,6 +467,36 @@ static void write_args(msgpack_writer &w, const cmd_arg *args, uint32_t count)
 // command execution
 // ------------------------------------------------------------------ //
 
+int32_t soulcloud::decode_command_id(const uint8_t *payload, size_t len, uint8_t *id_out)
+{
+    msgpack_reader r(payload, len);
+    const uint32_t map_count = r.expect_map();
+    if (!r.ok()) {
+        return r.err();
+    }
+    for (uint32_t i = 0; i < map_count; ++i) {
+        char key[24];
+        size_t key_len = 0;
+        if (r.read_key(key, sizeof(key), &key_len) != ERR_OK) {
+            return r.err();
+        }
+        if (key_len == 2 && memcmp(key, "id", 2) == 0) {
+            const uint8_t *bin = nullptr;
+            uint32_t bin_len = 0;
+            if (r.read_bin(&bin, &bin_len, 16) != ERR_OK) {
+                return r.err();
+            }
+            if (bin_len != 16u) {
+                return ERR_FIELD_LEN;
+            }
+            memcpy(id_out, bin, 16);
+            return ERR_OK;
+        }
+        r.skip_value();
+    }
+    return ERR_MISSING_FIELD;
+}
+
 int32_t soulcloud::decode_command_exec(const uint8_t *payload, size_t len, command_exec *out)
 {
     msgpack_reader r(payload, len);

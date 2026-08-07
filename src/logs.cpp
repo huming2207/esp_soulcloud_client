@@ -139,9 +139,13 @@ void soulcloud::log_sender::sink_end(void *ctx)
     self->packet_active = false;
     if (!self->overflow && self->log_rb != nullptr) {
         // producer side: zero-tick enqueue; a full ring buffer drops the
-        // packet (logs are lossy), the consumer drains in order
+        // packet (logs are lossy), the consumer drains in order. A drop
+        // of the drop-notification itself is not counted (re-entrancy
+        // guard, see drain()).
         if (xRingbufferSend(self->log_rb, self->packet, self->packet_len, 0) != pdTRUE) {
-            self->dropped_count++;
+            if (!self->drop_notify_inflight) {
+                self->dropped_count++;
+            }
         }
     }
     xSemaphoreGive(self->_sink_mutex);
@@ -160,6 +164,23 @@ void soulcloud::log_sender::drain()
         }
         vRingbufferReturnItem(log_rb, item);
         item = (uint8_t *)xRingbufferReceive(log_rb, &len, 0);
+    }
+
+    // Drop visibility: surface accumulated drops as a WARN packet through
+    // the normal log path (throttled to one per second). The notification
+    // is emitted with drop_notify_inflight set so its own ring-buffer
+    // drop is not counted and it cannot re-trigger itself; a later
+    // throttle/disconnect drop of the notification simply counts again
+    // and the next WARN reports the new total.
+    if (dropped_count > 0 && !drop_notify_inflight) {
+        const uint64_t now = (uint64_t)esp_timer_get_time();
+        if (now - last_drop_notify_us >= 1000000ull) {
+            drop_notify_inflight = true;
+            ON9_LOGW("soulcloud", "log uplink dropped %lu packets", (unsigned long)dropped_count);
+            dropped_count = 0;
+            last_drop_notify_us = now;
+            drop_notify_inflight = false;
+        }
     }
 }
 

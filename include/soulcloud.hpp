@@ -6,9 +6,10 @@
  * Lifecycle: config_store::instance().load() -> soulcloud_client::init()
  *            -> start() -> (running) -> stop() -> deinit().
  *
- * Memory rules: all storage is static/stack; heap allocation happens only
- * inside init()/deinit() (the PIMPL and esp-mqtt internals) and nowhere
- * else.
+ * Memory rules: all storage is static/stack except the PIMPL itself and
+ * the ring buffers (allocated in init(), freed in deinit()); inbound
+ * MQTT messages additionally allocate a short-lived staging buffer per
+ * message in on_mqtt_data().
  */
 
 #include <esp_err.h>
@@ -77,7 +78,11 @@ namespace soulcloud
          *
          * Starts from Kconfig defaults, applies NVS overrides for each
          * key, and fills cfg->serial with the MAC-derived value when it
-         * is left empty.
+         * is left empty. Every scalar is clamped to a sane range on load
+         * (a zero log_rate_per_s would divide by zero in the log sink; a
+         * zero stat_interval_s would make the stat timer fire
+         * continuously); clamped values are rewritten to NVS so the bad
+         * entries cannot come back on the next boot.
          *
          * @param[out] out Filled config (must be non-NULL).
          * @return
@@ -170,8 +175,10 @@ namespace soulcloud
      * @brief Soulcloud device client (singleton).
      *
      * Owns the MQTT bridge, the stat timer, the log sink and the OTA
-     * executor. All state is internal (PIMPL); the only heap allocation
-     * happens in init()/deinit().
+     * executor. All state is internal (PIMPL). Long-lived heap
+     * allocations happen in init()/deinit() (PIMPL, ring buffers);
+     * inbound MQTT messages also allocate a per-message staging buffer
+     * in on_mqtt_data().
      */
     class soulcloud_client
     {
@@ -295,8 +302,9 @@ namespace soulcloud
         void on_mqtt_connected();
         void on_mqtt_disconnected();
         /** MQTT event callback: classifies the topic, copies the payload
-         *  into the core task's inbound buffer and signals it (never
-         *  runs handlers on the esp-mqtt task stack). */
+         *  into the core task's inbound ring buffer (it is drained by the
+         *  dedicated core task; handlers never run on the esp-mqtt task
+         *  stack). */
         void on_mqtt_data(const char *topic, size_t topic_len,
                           const uint8_t *data, size_t data_len);
         /** Core task: dispatches a copied cmd/exec payload. */

@@ -43,6 +43,27 @@ static uint32_t load_u32(nvs_handle_t h, const char *key, uint32_t fallback)
     return fallback;
 }
 
+/**
+ * Clamps a scalar to [min, max]; *changed is set when the value was
+ * out of range. NVS is writable through the public set_* API, so a
+ * bogus value (e.g. log_rate_per_s = 0, which divides by zero in the
+ * log sink) must never survive a load().
+ */
+static uint32_t clamp_u32(uint32_t v, uint32_t min, uint32_t max, bool *changed)
+{
+    uint32_t out = v;
+    if (out < min) {
+        out = min;
+    }
+    if (out > max) {
+        out = max;
+    }
+    if (out != v) {
+        *changed = true;
+    }
+    return out;
+}
+
 void soulcloud::config_store::derive_serial(char *out, size_t cap) const
 {
     uint8_t mac[6] = {};
@@ -80,22 +101,57 @@ esp_err_t soulcloud::config_store::load(config *out)
     };
 
     *out = defaults;
+    bool changed = false;  // any scalar clamped out of range (self-heal below)
     if (h != 0) {
         load_str(h, KEY_UID, out->device_uid, sizeof(out->device_uid), defaults.device_uid);
         load_str(h, KEY_PASS, out->device_password, sizeof(out->device_password), defaults.device_password);
         load_str(h, KEY_SERIAL, out->serial, sizeof(out->serial), defaults.serial);
         load_str(h, KEY_BROKER, out->broker_uri, sizeof(out->broker_uri), defaults.broker_uri);
         load_str(h, KEY_API, out->api_base_url, sizeof(out->api_base_url), defaults.api_base_url);
-        out->stat_interval_s = load_u32(h, KEY_STAT_INT, defaults.stat_interval_s);
-        out->log_rate_per_s = load_u32(h, KEY_LOG_RATE, defaults.log_rate_per_s);
-        out->log_queue_len = load_u32(h, KEY_LOG_Q, defaults.log_queue_len);
-        out->mqtt_buffer_in = load_u32(h, KEY_MQTT_IN, defaults.mqtt_buffer_in);
-        out->mqtt_buffer_out = load_u32(h, KEY_MQTT_OUT, defaults.mqtt_buffer_out);
-        out->mqtt_keepalive_s = load_u32(h, KEY_KA, defaults.mqtt_keepalive_s);
-        out->mqtt_reconnect_timeout_ms = load_u32(h, KEY_RECONN, defaults.mqtt_reconnect_timeout_ms);
-        out->ota_max_bytes = load_u32(h, KEY_OTA_MAX, defaults.ota_max_bytes);
-        out->ota_timeout_s = load_u32(h, KEY_OTA_TO, defaults.ota_timeout_s);
+        // Every scalar is clamped to a sane range: a zero or absurd NVS
+        // value must not reach the runtime (log_rate_per_s = 0 divides by
+        // zero in the log sink and panics; stat_interval_s = 0 makes the
+        // stat timer fire continuously).
+        out->stat_interval_s = clamp_u32(load_u32(h, KEY_STAT_INT, defaults.stat_interval_s),
+                                         1, 86400, &changed);
+        out->log_rate_per_s = clamp_u32(load_u32(h, KEY_LOG_RATE, defaults.log_rate_per_s),
+                                        1, 1000, &changed);
+        out->log_queue_len = clamp_u32(load_u32(h, KEY_LOG_Q, defaults.log_queue_len),
+                                       1, 1024, &changed);
+        out->mqtt_buffer_in = clamp_u32(load_u32(h, KEY_MQTT_IN, defaults.mqtt_buffer_in),
+                                        512, 65536, &changed);
+        out->mqtt_buffer_out = clamp_u32(load_u32(h, KEY_MQTT_OUT, defaults.mqtt_buffer_out),
+                                         512, 65536, &changed);
+        out->mqtt_keepalive_s = clamp_u32(load_u32(h, KEY_KA, defaults.mqtt_keepalive_s),
+                                          5, 3600, &changed);
+        out->mqtt_reconnect_timeout_ms = clamp_u32(load_u32(h, KEY_RECONN, defaults.mqtt_reconnect_timeout_ms),
+                                                   100, 600000, &changed);
+        out->ota_max_bytes = clamp_u32(load_u32(h, KEY_OTA_MAX, defaults.ota_max_bytes),
+                                       65536, 67108864, &changed);
+        out->ota_timeout_s = clamp_u32(load_u32(h, KEY_OTA_TO, defaults.ota_timeout_s),
+                                       1, 3600, &changed);
         nvs_close(h);
+    }
+
+    // Self-heal: rewrite the clamped values so the bad NVS entries cannot
+    // keep coming back on every boot (and the next set_u32 of a corrected
+    // value is not masked by a stale bad one).
+    if (changed) {
+        nvs_handle_t wh = 0;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &wh) == ESP_OK) {
+            nvs_set_u32(wh, KEY_STAT_INT, out->stat_interval_s);
+            nvs_set_u32(wh, KEY_LOG_RATE, out->log_rate_per_s);
+            nvs_set_u32(wh, KEY_LOG_Q, out->log_queue_len);
+            nvs_set_u32(wh, KEY_MQTT_IN, out->mqtt_buffer_in);
+            nvs_set_u32(wh, KEY_MQTT_OUT, out->mqtt_buffer_out);
+            nvs_set_u32(wh, KEY_KA, out->mqtt_keepalive_s);
+            nvs_set_u32(wh, KEY_RECONN, out->mqtt_reconnect_timeout_ms);
+            nvs_set_u32(wh, KEY_OTA_MAX, out->ota_max_bytes);
+            nvs_set_u32(wh, KEY_OTA_TO, out->ota_timeout_s);
+            nvs_commit(wh);
+            nvs_close(wh);
+            ESP_LOGW(TAG, "NVS scalars out of range; clamped and rewritten");
+        }
     }
 
     if (out->serial[0] == '\0') {

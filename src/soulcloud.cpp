@@ -251,6 +251,13 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     if (cfg == nullptr || cfg->device_uid[0] == '\0' || cfg->broker_uri[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
+    // Scalar sanity: config_store::load() clamps NVS values, but init()
+    // also accepts hand-built configs; a zero here would divide by zero
+    // in the log sink (log_rate_per_s) or make the stat timer fire
+    // continuously (stat_interval_s).
+    if (cfg->log_rate_per_s == 0 || cfg->stat_interval_s == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
     _cfg = *cfg;
     impl = new client_impl(*this);  // sole heap allocation (deinit frees)
@@ -439,6 +446,12 @@ void soulcloud::soulcloud_client::on_mqtt_connected()
 
     ESP_LOGI(TAG, "connected; subscribed to cmd/exec and ota");
     report_stat();
+
+    // First successful connect after an OTA reboot = the new firmware is
+    // healthy: promote the pending release (and cancel the bootloader
+    // rollback). Idempotent; a rollback never reaches this point, so a
+    // rolled-back device still accepts the same release again.
+    soulcloud::ota_executor::instance().finalize_pending_ota();
 
     if (conn_cb != nullptr) {
         conn_cb(true, conn_ctx);

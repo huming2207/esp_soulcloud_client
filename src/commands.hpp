@@ -24,8 +24,9 @@ namespace soulcloud
      * answered with the stored result code instead of running the
      * handler again.
      *
-     * @note dispatch() runs on the MQTT event task; handlers must be
-     *       quick and non-blocking.
+     * @note dispatch() runs on the dedicated soulcloud core task (not
+     *       the MQTT event task); handlers must still be quick and
+     *       non-blocking.
      */
     class command_registry
     {
@@ -39,6 +40,12 @@ namespace soulcloud
             static command_registry s_instance;
             return s_instance;
         }
+
+        /** Result code for a payload rejected by decode (malformed or
+         *  over the device-side limits). The platform shows non-zero
+         *  codes as failures, so a rejected command must not hang until
+         *  timeout. */
+        static constexpr int32_t CMD_RESULT_ERR_DECODE = -3;
 
         command_registry(const command_registry &) = delete;
         command_registry &operator=(const command_registry &) = delete;
