@@ -176,8 +176,66 @@ public:
             }
             vTaskDelay(1);  // 1 RTOS tick poll interval
         }
-        task = nullptr;  // tell deinit() we are gone (before self-delete)
+        task = nullptr;  // tell destroy() we are gone (before self-delete)
         vTaskDelete(nullptr);
+    }
+
+    /**
+     * @brief Shared teardown: every init() error path and deinit() funnel
+     *        through here, so a partial init can never leak the core task
+     *        or ring buffers nor leave them dangling.
+     *
+     * Order matters (use-after-free audit):
+     *  1. The core task consumes inbound_rb and the log ring buffer, so it
+     *     must exit first (it polls on a 1-tick interval and self-deletes;
+     *     the forced vTaskDelete is a watchdog-only fallback).
+     *  2. The MQTT client is destroyed BEFORE the inbound ring buffer:
+     *     the esp-mqtt event task may be blocked inside on_mqtt_data() on
+     *     xRingbufferSend() (100 ms backpressure wait), and
+     *     esp_mqtt_client_destroy() waits for that task to exit. Deleting
+     *     the ring buffer first used to be a use-after-free (M1).
+     *  3. Only then are the ring buffers deleted and the singleton
+     *     sub-components (log sink, OTA executor) torn down; both are
+     *     idempotent when their init never ran.
+     */
+    static void destroy(soulcloud_client &self)
+    {
+        client_impl *impl = self.impl;
+        if (impl == nullptr) {
+            return;
+        }
+
+        if (impl->task != nullptr) {
+            impl->exit = true;
+            // the task polls the ring buffer on a short timeout, so it wakes
+            // up and self-deletes; wait briefly for it to finish
+            for (uint32_t i = 0; i < 100 && impl->task != nullptr; ++i) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (impl->task != nullptr) {
+                vTaskDelete(impl->task);  // forced (should not happen)
+            }
+            impl->task = nullptr;
+        }
+
+        if (impl->stat_timer != nullptr) {
+            esp_timer_stop(impl->stat_timer);
+            esp_timer_delete(impl->stat_timer);
+            impl->stat_timer = nullptr;
+        }
+
+        // stop the MQTT client and wait for its event task to exit before
+        // deleting the ring buffer it can be blocked on
+        impl->bridge.deinit();
+
+        if (impl->inbound_rb != nullptr) {
+            vRingbufferDelete(impl->inbound_rb);
+            impl->inbound_rb = nullptr;
+        }
+        soulcloud::log_sender::instance().deinit();
+        soulcloud::ota_executor::instance().deinit();
+        delete impl;
+        self.impl = nullptr;
     }
 };
 
@@ -207,8 +265,7 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
 
     esp_err_t err = impl->bridge.init(cfg, &cbs);
     if (err != ESP_OK) {
-        delete impl;
-        impl = nullptr;
+        client_impl::destroy(*this);
         return err;
     }
 
@@ -221,9 +278,7 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     };
     err = esp_timer_create(&timer_args, &impl->stat_timer);
     if (err != ESP_OK) {
-        impl->bridge.deinit();
-        delete impl;
-        impl = nullptr;
+        client_impl::destroy(*this);
         return err;
     }
 
@@ -236,10 +291,7 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
                                                    RINGBUF_TYPE_BYTEBUF,
                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (impl->inbound_rb == nullptr) {
-        esp_timer_delete(impl->stat_timer);
-        impl->bridge.deinit();
-        delete impl;
-        impl = nullptr;
+        client_impl::destroy(*this);
         return ESP_ERR_NO_MEM;
     }
     TaskHandle_t task = nullptr;
@@ -248,12 +300,7 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
                               5, &task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     impl->task = task;
     if (err != pdPASS) {
-        vRingbufferDelete(impl->inbound_rb);
-        impl->inbound_rb = nullptr;
-        esp_timer_delete(impl->stat_timer);
-        impl->bridge.deinit();
-        delete impl;
-        impl = nullptr;
+        client_impl::destroy(*this);
         return ESP_ERR_NO_MEM;
     }
 
@@ -262,20 +309,13 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     // caller's `cfg` lives on the main_task stack only until init() returns.
     err = soulcloud::log_sender::instance().init(&_cfg, &impl->bridge);
     if (err != ESP_OK) {
-        esp_timer_delete(impl->stat_timer);
-        impl->bridge.deinit();
-        delete impl;
-        impl = nullptr;
+        client_impl::destroy(*this);
         return err;
     }
 
     err = soulcloud::ota_executor::instance().init(&_cfg, &impl->bridge);
     if (err != ESP_OK) {
-        soulcloud::log_sender::instance().deinit();
-        esp_timer_delete(impl->stat_timer);
-        impl->bridge.deinit();
-        delete impl;
-        impl = nullptr;
+        client_impl::destroy(*this);
         return err;
     }
 
@@ -322,32 +362,7 @@ esp_err_t soulcloud::soulcloud_client::deinit()
     if (!inited || impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (impl->stat_timer != nullptr) {
-        esp_timer_stop(impl->stat_timer);
-        esp_timer_delete(impl->stat_timer);
-    }
-    // stop the core task: flag + signal, then wait for it to exit
-    if (impl->task != nullptr) {
-        impl->exit = true;
-        // the task polls the ring buffer on a short timeout, so it wakes
-        // up and self-deletes; wait briefly for it to finish
-        for (uint32_t i = 0; i < 100 && impl->task != nullptr; ++i) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        if (impl->task != nullptr) {
-            vTaskDelete(impl->task);  // forced (should not happen)
-        }
-        impl->task = nullptr;
-    }
-    if (impl->inbound_rb != nullptr) {
-        vRingbufferDelete(impl->inbound_rb);
-        impl->inbound_rb = nullptr;
-    }
-    soulcloud::log_sender::instance().deinit();
-    soulcloud::ota_executor::instance().deinit();
-    impl->bridge.deinit();
-    delete impl;
-    impl = nullptr;
+    client_impl::destroy(*this);
     inited = false;
     started = false;
     connected = false;
