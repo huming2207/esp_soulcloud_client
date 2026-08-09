@@ -66,10 +66,11 @@ int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len
         // possible when the id is extractable; a payload without a
         // usable id cannot be answered at all.
         uint8_t id[16] = {};
-        if (decode_command_id(payload, len, id) == ERR_OK) {
+        uint64_t seq = 0;
+        if (decode_command_id(payload, len, id, &seq) == ERR_OK) {
             command_result result = {};
             result.id = id;
-            result.seq = 0;
+            result.seq = seq;  // backend matches the result by (id, seq)
             result.args = nullptr;
             result.arg_count = 0;
             result.code = CMD_RESULT_ERR_DECODE;

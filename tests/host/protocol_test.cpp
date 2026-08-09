@@ -95,11 +95,13 @@ static void test_decode_command_id()
     uint8_t buf[1024];
     size_t len = 0;
     uint8_t id[16] = {};
+    uint64_t seq = 0;
 
     // golden fixture: id is the first key
     CHECK(load_file("fixtures/cmd_exec.msgpack", buf, sizeof(buf), &len), "load cmd_exec fixture");
-    CHECK(decode_command_id(buf, len, id) == ERR_OK, "id extracted from golden fixture");
+    CHECK(decode_command_id(buf, len, id, &seq) == ERR_OK, "id extracted from golden fixture");
     CHECK(memcmp(id, EXPECTED_ID, 16) == 0, "id bytes match");
+    CHECK(seq == 1, "seq extracted from golden fixture");
 
     // id in the middle, unknown/other keys before it (skip_value path)
     {
@@ -114,8 +116,43 @@ static void test_decode_command_id()
         w.finish_map();
         len = w.bytes_written();
         CHECK(w.finish() == ERR_OK, "write id-last payload");
-        CHECK(decode_command_id(buf, len, id) == ERR_OK, "id extracted with other keys first");
+        seq = 0;
+        CHECK(decode_command_id(buf, len, id, &seq) == ERR_OK, "id extracted with other keys first");
         CHECK(memcmp(id, EXPECTED_ID, 16) == 0, "id bytes match");
+        CHECK(seq == 7, "seq extracted alongside the id");
+    }
+
+    // wrong-typed seq BEFORE the id: mpack errors are sticky, so the
+    // seq must be skipped rather than read or the id extraction fails
+    {
+        msgpack_writer w(buf, sizeof(buf));
+        w.start_map(2);
+        w.write_str("seq");
+        w.write_str("not-a-number");
+        w.write_str("id");
+        w.write_bin(EXPECTED_ID, 16);
+        w.finish_map();
+        len = w.bytes_written();
+        CHECK(w.finish() == ERR_OK, "write wrong-typed-seq payload");
+        seq = 99;
+        CHECK(decode_command_id(buf, len, id, &seq) == ERR_OK,
+              "wrong-typed seq skipped, id still extracted");
+        CHECK(memcmp(id, EXPECTED_ID, 16) == 0, "id bytes match");
+        CHECK(seq == 99, "seq untouched by the wrong-typed value");
+    }
+
+    // id present, seq missing -> seq stays 0 but the result is answerable
+    {
+        msgpack_writer w(buf, sizeof(buf));
+        w.start_map(1);
+        w.write_str("id");
+        w.write_bin(EXPECTED_ID, 16);
+        w.finish_map();
+        len = w.bytes_written();
+        CHECK(w.finish() == ERR_OK, "write id-only payload");
+        seq = 99;
+        CHECK(decode_command_id(buf, len, id, &seq) == ERR_OK, "id-only payload answered");
+        CHECK(seq == 99, "seq untouched when absent");
     }
 
     // not a map at all
@@ -124,7 +161,7 @@ static void test_decode_command_id()
         w.write_uint(42);
         len = w.bytes_written();
         CHECK(w.finish() == ERR_OK, "write non-map payload");
-        CHECK(decode_command_id(buf, len, id) == ERR_BAD_MSG, "non-map rejected");
+        CHECK(decode_command_id(buf, len, id, &seq) == ERR_BAD_MSG, "non-map rejected");
     }
 
     // map without an id
@@ -136,7 +173,7 @@ static void test_decode_command_id()
         w.finish_map();
         len = w.bytes_written();
         CHECK(w.finish() == ERR_OK, "write no-id payload");
-        CHECK(decode_command_id(buf, len, id) == ERR_MISSING_FIELD, "missing id reported");
+        CHECK(decode_command_id(buf, len, id, &seq) == ERR_MISSING_FIELD, "missing id reported");
     }
 
     // id of the wrong type
@@ -148,7 +185,7 @@ static void test_decode_command_id()
         w.finish_map();
         len = w.bytes_written();
         CHECK(w.finish() == ERR_OK, "write str-id payload");
-        CHECK(decode_command_id(buf, len, id) == ERR_TYPE, "non-bin id rejected");
+        CHECK(decode_command_id(buf, len, id, &seq) == ERR_TYPE, "non-bin id rejected");
     }
 }
 

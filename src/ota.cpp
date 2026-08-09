@@ -8,6 +8,8 @@
 
 #include "ota.hpp"
 
+#include <sdkconfig.h>
+
 #include <cstdio>
 #include <cstring>
 
@@ -83,18 +85,6 @@ bool soulcloud::ota_executor::last_ota_matches(const char *release_id) const
     return err == ESP_OK && strcmp(last, release_id) == 0;
 }
 
-void soulcloud::ota_executor::store_last_ota(const char *release_id)
-{
-    nvs_handle_t h = 0;
-    if (nvs_open("soulcloud", NVS_READWRITE, &h) != ESP_OK) {
-        return;
-    }
-    if (nvs_set_str(h, NVS_KEY_LAST_REL, release_id) == ESP_OK) {
-        nvs_commit(h);
-    }
-    nvs_close(h);
-}
-
 void soulcloud::ota_executor::store_pending_ota(const char *release_id)
 {
     nvs_handle_t h = 0;
@@ -119,19 +109,36 @@ void soulcloud::ota_executor::finalize_pending_ota()
         nvs_close(h);
         return;  // nothing pending (also the common case)
     }
-    // Cancel the bootloader rollback when this image was booted as
-    // PENDING_VERIFY (rollback-enabled builds); with no rollback enabled
-    // the state is not PENDING_VERIFY and the promotion below is plain.
+    // First boot after an OTA: only the freshly flashed image is allowed
+    // to promote the pending release. With rollback enabled the bootloader
+    // marks it PENDING_VERIFY; any other state means we booted an image
+    // that was NOT just flashed (e.g. the new firmware crashed and the
+    // bootloader rolled back to the old one). Promoting then would record
+    // the failed release as applied forever, so drop the pending record
+    // instead.
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
-    if (running != nullptr &&
-        esp_ota_get_state_partition(running, &state) == ESP_OK &&
-        state == ESP_OTA_IMG_PENDING_VERIFY &&
-        esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
+    if (running != nullptr) {
+        esp_ota_get_state_partition(running, &state);
+    }
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGW(TAG, "booted image is not pending-verify (state %d); "
+                      "dropping pending release %s",
+                 (int)state, pending_rel);
+        nvs_erase_key(h, NVS_KEY_PENDING_REL);
+        nvs_commit(h);
+        nvs_close(h);
+        return;
+    }
+    if (esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
         ESP_LOGW(TAG, "mark app valid failed; keeping release pending");
         nvs_close(h);
         return;  // retried on the next connect
     }
+#else
+    (void)state;  // no rollback mechanism: the pending image is the running one
+#endif
     // Promote: ota_rel = pending, erase pending.
     nvs_set_str(h, NVS_KEY_LAST_REL, pending_rel);
     nvs_erase_key(h, NVS_KEY_PENDING_REL);

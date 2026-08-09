@@ -114,8 +114,11 @@ esp_err_t soulcloud::config_store::load(config *out)
         // stat timer fire continuously).
         out->stat_interval_s = clamp_u32(load_u32(h, KEY_STAT_INT, defaults.stat_interval_s),
                                          1, 86400, &changed);
+        // upper bound matches Kconfig (range 1 20) and the broker-side
+        // uplink guard (20/s, burst 100); a higher rate would be dropped
+        // server-side without any device-visible signal
         out->log_rate_per_s = clamp_u32(load_u32(h, KEY_LOG_RATE, defaults.log_rate_per_s),
-                                        1, 1000, &changed);
+                                        1, 20, &changed);
         out->log_queue_len = clamp_u32(load_u32(h, KEY_LOG_Q, defaults.log_queue_len),
                                        1, 1024, &changed);
         out->mqtt_buffer_in = clamp_u32(load_u32(h, KEY_MQTT_IN, defaults.mqtt_buffer_in),

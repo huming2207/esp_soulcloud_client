@@ -150,7 +150,6 @@ namespace soulcloud
                                  size_t *total_out, ota_fail *fail);
         void report_state(const char *state, int32_t code, const char *message);
         bool last_ota_matches(const char *release_id) const;
-        void store_last_ota(const char *release_id);
         void store_pending_ota(const char *release_id);
 
         static void task_trampoline(void *ctx);

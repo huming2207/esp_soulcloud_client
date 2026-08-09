@@ -224,6 +224,13 @@ public:
             impl->stat_timer = nullptr;
         }
 
+        // Stop the OTA executor BEFORE the MQTT client: its deinit waits
+        // (bounded) for an in-flight OTA task, which may still be
+        // publishing ota/result reports through the bridge. Destroying
+        // the bridge first would lose those reports and, in an extreme
+        // interleaving, let the OTA task touch a freed client.
+        soulcloud::ota_executor::instance().deinit();
+
         // stop the MQTT client and wait for its event task to exit before
         // deleting the ring buffer it can be blocked on
         impl->bridge.deinit();
@@ -233,7 +240,6 @@ public:
             impl->inbound_rb = nullptr;
         }
         soulcloud::log_sender::instance().deinit();
-        soulcloud::ota_executor::instance().deinit();
         delete impl;
         self.impl = nullptr;
     }

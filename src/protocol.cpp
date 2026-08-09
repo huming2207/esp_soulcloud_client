@@ -467,13 +467,15 @@ static void write_args(msgpack_writer &w, const cmd_arg *args, uint32_t count)
 // command execution
 // ------------------------------------------------------------------ //
 
-int32_t soulcloud::decode_command_id(const uint8_t *payload, size_t len, uint8_t *id_out)
+int32_t soulcloud::decode_command_id(const uint8_t *payload, size_t len, uint8_t *id_out,
+                                      uint64_t *seq_out)
 {
     msgpack_reader r(payload, len);
     const uint32_t map_count = r.expect_map();
     if (!r.ok()) {
         return r.err();
     }
+    bool have_id = false;
     for (uint32_t i = 0; i < map_count; ++i) {
         char key[24];
         size_t key_len = 0;
@@ -490,11 +492,24 @@ int32_t soulcloud::decode_command_id(const uint8_t *payload, size_t len, uint8_t
                 return ERR_FIELD_LEN;
             }
             memcpy(id_out, bin, 16);
-            return ERR_OK;
+            have_id = true;
+        } else if (key_len == 3 && memcmp(key, "seq", 3) == 0) {
+            // best-effort: a malformed seq keeps the error result
+            // answerable (the backend matches on id first, seq second);
+            // leave *seq_out at 0 when it is absent or wrong-typed.
+            // Peek before consuming: mpack reader errors are sticky, so a
+            // wrong-typed seq must be skipped (not read) or it would
+            // poison the scan before the id is found.
+            if (r.peek_type() == mpack_type_uint) {
+                *seq_out = r.expect_u64();
+            } else {
+                r.skip_value();
+            }
+        } else {
+            r.skip_value();
         }
-        r.skip_value();
     }
-    return ERR_MISSING_FIELD;
+    return have_id ? ERR_OK : ERR_MISSING_FIELD;
 }
 
 int32_t soulcloud::decode_command_exec(const uint8_t *payload, size_t len, command_exec *out)

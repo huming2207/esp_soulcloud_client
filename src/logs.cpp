@@ -206,8 +206,8 @@ void soulcloud::log_sender::send_packet(const uint8_t *pkt, size_t len)
     const int32_t msg_id = _bridge->publish(topic, pkt, len, 0);
     if (msg_id < 0) {
         dropped_count++;
-    } else if (dropped_count > 0) {
-        ESP_LOGD(TAG, "dropped %lu log packets under throttle", (unsigned long)dropped_count);
-        dropped_count = 0;
     }
+    // NOTE: dropped_count is only reset by the drop WARN in drain(); a
+    // successful send must not swallow the accumulated count, or the
+    // "reconnect and report once" visibility would silently vanish.
 }

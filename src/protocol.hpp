@@ -281,24 +281,30 @@ namespace soulcloud
     int32_t decode_command_exec(const uint8_t *payload, size_t len, command_exec *out);
 
     /**
-     * @brief Extract only the 16-byte command id from a `cmd/exec`
+     * @brief Extract the 16-byte command id and its seq from a `cmd/exec`
      *        payload, without full validation.
      *
      * Used to answer error results when decode_command_exec() rejects a
      * payload: the platform would otherwise wait forever with no way to
      * distinguish "not received" from "rejected device-side". The
      * MessagePack map order is not guaranteed, so a failed full decode
-     * cannot rely on the id having been parsed — this scans for the id
-     * field independently and skips every other value.
+     * cannot rely on the fields having been parsed — this scans for the
+     * id and seq fields independently and skips every other value.
+     *
+     * The seq matters for the backend: it matches the recorded result
+     * against the issued command by (id, seq), so an error result with
+     * seq = 0 would be dropped as unsolicited.
      *
      * @param[in]  payload Raw `cmd/exec` payload.
      * @param[in]  len     Payload length.
      * @param[out] id_out  16-byte command id.
+     * @param[out] seq_out Command seq (0 when absent or malformed).
      * @return ERR_OK with *id_out filled; ERR_BAD_MSG/ERR_TYPE/... when
      *         the payload is not a map containing a well-formed id (the
      *         message cannot be answered then).
      */
-    int32_t decode_command_id(const uint8_t *payload, size_t len, uint8_t *id_out);
+    int32_t decode_command_id(const uint8_t *payload, size_t len, uint8_t *id_out,
+                              uint64_t *seq_out);
 
     // ------------------------------------------------------------------ //
     // command result (encode of cmd/result payloads)
