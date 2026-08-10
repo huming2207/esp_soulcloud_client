@@ -5,8 +5,10 @@
  *
  * Installs an on9log sink that reassembles each encoded packet (header +
  * payload chunks) under a mutex and publishes it to the `log` topic at
- * QoS 1, throttled to the configured rate. Packets over the rate limit
- * are dropped silently (on9log core tracks its own overflow separately).
+ * QoS 0 (best-effort telemetry; drops are counted and surfaced via the
+ * drop WARN), throttled to the configured rate. Packets over the rate
+ * limit are dropped silently (on9log core tracks its own overflow
+ * separately).
  * With cfg->log_batch_count > 1 packets are accumulated and published as
  * one aggregated container (PROTOCOL.log-packaging.md).
  *

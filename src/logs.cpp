@@ -299,7 +299,12 @@ void soulcloud::log_sender::flush_batch()
 
     char topic[160] = {};
     topic_log(topic, sizeof(topic), _cfg->device_uid);
-    const int32_t msg_id = _bridge->publish(topic, batch, total, 1);
+    // QoS 0: log uplink is lossy telemetry (drops are counted and
+    // surfaced via the drop WARN). QoS 1 with a persistent session made
+    // the broker queue unacked log messages during reconnect storms and
+    // triggered connection teardowns on slow links (observed in the QEMU
+    // CI runner), so logs stay best-effort.
+    const int32_t msg_id = _bridge->publish(topic, batch, total, 0);
     if (msg_id < 0) {
         dropped_count++;
     }
@@ -320,7 +325,7 @@ void soulcloud::log_sender::send_packet(const uint8_t *pkt, size_t len)
 
     char topic[160] = {};
     topic_log(topic, sizeof(topic), _cfg->device_uid);
-    const int32_t msg_id = _bridge->publish(topic, pkt, len, 1);  // QoS 1 per protocol
+    const int32_t msg_id = _bridge->publish(topic, pkt, len, 0);  // QoS 0, see flush_batch
     if (msg_id < 0) {
         dropped_count++;
     }
