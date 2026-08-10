@@ -102,14 +102,62 @@ menu "Soulcloud client"
     config SOULCLOUD_LOG_RB_SIZE
         int "Log ring buffer size (bytes)"
         default 16384
-        range 4096 65536
+        range 1024 262144
         help
             FreeRTOS ring buffer between the on9log sink (producer, runs
             on the log source's task) and the core dispatch task
             (consumer, publishes to MQTT with throttling). The sink
             enqueues with a zero-tick wait, so a full buffer simply drops
-            the packet (logs are lossy telemetry). Allocated from PSRAM
-            when available.
+            the packet (logs are lossy telemetry). Overridable at runtime
+            via the "rb_size" NVS key (setConfig).
+
+    choice SOULCLOUD_LOG_RB_MEM
+        prompt "Log ring buffer memory"
+        default SOULCLOUD_LOG_RB_MEM_INTERNAL
+        help
+            Where the log ring buffer is allocated. Internal SRAM is
+            always safe (flash writes during OTA suspend the cache, and
+            PSRAM access in that window panics); PSRAM trades that for a
+            bigger buffer on devices with external RAM.
+
+    config SOULCLOUD_LOG_RB_MEM_INTERNAL
+        bool "Internal SRAM"
+
+    config SOULCLOUD_LOG_RB_MEM_PSRAM
+        bool "PSRAM"
+
+    endchoice
+
+    config SOULCLOUD_LOG_RB_FLUSH_AT
+        int "Log ring buffer flush watermark (bytes)"
+        default 8192
+        range 256 262144
+        help
+            When the ring buffer's free space drops below this many bytes
+            (batching mode), the accumulated batch is flushed immediately
+            to relieve backpressure before packets start getting dropped.
+            Overridable at runtime via the "rb_flush" NVS key.
+
+    config SOULCLOUD_LOG_BATCH_COUNT
+        int "Log batch count (packets per publish; 1 = disabled)"
+        default 1
+        range 1 4096
+        help
+            When > 1, log packets are accumulated and published as one
+            aggregated container (PROTOCOL.log-packaging.md) once this
+            many packets are queued, the batch byte budget is reached,
+            the force-flush timeout elapses, or the ring buffer hits the
+            watermark. 1 keeps the legacy single-packet behaviour with
+            the lowest latency. Overridable via the "batch_cnt" NVS key.
+
+    config SOULCLOUD_LOG_BATCH_TIMEOUT_MS
+        int "Log batch force-flush timeout (ms; 0 = disabled)"
+        default 0
+        range 0 60000
+        help
+            Force-flush a non-empty batch this long after it started.
+            0 disables the timer (flush driven by count/bytes/watermark
+            only). Overridable via the "batch_to" NVS key.
 
     config SOULCLOUD_INBOUND_MAX
         int "Inbound command/OTA payload buffer (bytes)"

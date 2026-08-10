@@ -762,3 +762,42 @@ int32_t soulcloud::encode_ota_result(uint8_t *buf, size_t cap, size_t *out_len, 
     *out_len = w.bytes_written();
     return w.finish();
 }
+// ------------------------------------------------------------------ //
+// log uplink container
+// ------------------------------------------------------------------ //
+
+int32_t soulcloud::encode_log_container(uint8_t *buf, size_t cap, size_t *out_len,
+                                        const uint8_t *const *pkts, const size_t *lens,
+                                        uint32_t n)
+{
+    if (buf == nullptr || out_len == nullptr || pkts == nullptr || lens == nullptr) {
+        return ERR_BAD_MSG;
+    }
+    if (n == 0 || n > LOG_CONTAINER_MAX_ELEMS) {
+        return ERR_OVERFLOW;
+    }
+    if (cap < 1) {
+        return ERR_OVERFLOW;
+    }
+    // Element sanity: empty or non-on9log elements are rejected by the
+    // platform, so refuse to send them (one bad element used to poison
+    // the whole container; better to drop it device-side).
+    for (uint32_t i = 0; i < n; ++i) {
+        if (lens[i] == 0 || pkts[i] == nullptr || pkts[i][0] != 0x9a) {
+            return ERR_BAD_MSG;
+        }
+    }
+
+    buf[0] = 0x01;  // container type byte (outside the msgpack payload)
+    msgpack_writer w(buf + 1, cap - 1);
+    w.start_array(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        w.write_bin(pkts[i], lens[i]);
+    }
+    w.finish_array();
+    if (w.err() != ERR_OK) {
+        return w.err();  // ERR_OVERFLOW (cap too small)
+    }
+    *out_len = 1 + w.bytes_written();
+    return ERR_OK;
+}

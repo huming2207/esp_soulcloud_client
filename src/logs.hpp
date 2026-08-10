@@ -5,8 +5,10 @@
  *
  * Installs an on9log sink that reassembles each encoded packet (header +
  * payload chunks) under a mutex and publishes it to the `log` topic at
- * QoS 0, throttled to the configured rate. Packets over the rate limit
+ * QoS 1, throttled to the configured rate. Packets over the rate limit
  * are dropped silently (on9log core tracks its own overflow separately).
+ * With cfg->log_batch_count > 1 packets are accumulated and published as
+ * one aggregated container (PROTOCOL.log-packaging.md).
  *
  * Design notes:
  *  - Producer/consumer split: sink callbacks (running on the log source's
@@ -119,6 +121,22 @@ namespace soulcloud
         uint32_t dropped_count = 0;
         bool drop_notify_inflight = false;  // re-entrancy guard for the drop WARN
         uint64_t last_drop_notify_us = 0;    // throttle: at most one WARN per second
+
+        // ---- batching (PROTOCOL.log-packaging.md) ----
+        // Batch buffer layout: [0..3] reserved for the container head
+        // (0x01 + array16); elements (bin8/bin16 header + packet bytes)
+        // accumulate from batch+4. On flush, <=15 elements compact the
+        // head to 0x01 + fixarray (memmove) and 16+ keep array16.
+        static constexpr uint32_t BATCH_MAX_BYTES = 4096;  // container budget
+        static constexpr uint32_t BATCH_MAX_ELEMS = 128;   // doc-suggested cap
+        uint8_t batch[4 + BATCH_MAX_BYTES] = {};
+        size_t batch_len = 0;        // element bytes accumulated
+        uint32_t batch_elems = 0;
+        uint64_t batch_start_us = 0;  // when the batch started (timeout base)
+
+        bool batch_append(const uint8_t *pkt, size_t len);
+        void flush_batch();
+        bool throttle_ok();
 
         static void sink_start(const uint8_t *header, size_t header_len, void *ctx);
         static void sink_payload(const uint8_t *payload, size_t payload_len,

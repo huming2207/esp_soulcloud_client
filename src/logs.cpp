@@ -31,9 +31,14 @@ esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
     if (_sink_mutex == nullptr) {
         return ESP_ERR_NO_MEM;
     }
-    // producer -> consumer queue for assembled log packets
-    log_rb = xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_LOG_RB_SIZE, RINGBUF_TYPE_BYTEBUF,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // producer -> consumer queue for assembled log packets. Size and
+    // memory placement are runtime-configurable (log_rb_size /
+    // log_rb_internal; internal SRAM is always safe during OTA flash
+    // writes, PSRAM trades that for capacity).
+    const uint32_t rb_caps = _cfg->log_rb_internal
+                                 ? (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+                                 : (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    log_rb = xRingbufferCreateWithCaps(_cfg->log_rb_size, RINGBUF_TYPE_BYTEBUF, rb_caps);
     if (log_rb == nullptr) {
         _sink_mutex = nullptr;
         return ESP_ERR_NO_MEM;
@@ -85,6 +90,8 @@ void soulcloud::log_sender::deinit()
     _cfg = nullptr;
     _bridge = nullptr;
     packet_active = false;
+    batch_len = 0;
+    batch_elems = 0;
     xSemaphoreGive(mtx);
 }
 
@@ -156,14 +163,54 @@ void soulcloud::log_sender::drain()
     if (log_rb == nullptr || _bridge == nullptr || _cfg == nullptr) {
         return;
     }
+    // While disconnected, leave the packets in the ring buffer: on
+    // reconnect they are drained and published (batched) instead of
+    // dropped, so batching never loses logs to a blip in the uplink.
+    if (!_bridge->is_connected()) {
+        return;
+    }
+
+    const bool batching = _cfg->log_batch_count > 1;
+
     size_t len = 0;
     uint8_t *item = (uint8_t *)xRingbufferReceive(log_rb, &len, 0);  // never block
     while (item != nullptr) {
         if (len > 0) {
-            send_packet(item, len);  // throttled publish (may drop)
+            if (batching) {
+                if (!batch_append(item, len)) {
+                    flush_batch();  // budget exhausted: send what we have
+                    if (!batch_append(item, len)) {
+                        // single packet larger than the batch budget:
+                        // send it raw rather than dropping it
+                        send_packet(item, len);
+                    }
+                }
+                if (batch_elems >= _cfg->log_batch_count ||
+                    batch_elems >= BATCH_MAX_ELEMS ||
+                    batch_len >= BATCH_MAX_BYTES - 128u) {
+                    flush_batch();
+                }
+            } else {
+                send_packet(item, len);  // throttled publish (may drop)
+            }
         }
         vRingbufferReturnItem(log_rb, item);
         item = (uint8_t *)xRingbufferReceive(log_rb, &len, 0);
+    }
+
+    if (batching && batch_elems > 0) {
+        // force-flush triggers: timeout since the batch started, or the
+        // ring buffer is close to full (backpressure: flush before
+        // packets start getting dropped)
+        const uint64_t now = (uint64_t)esp_timer_get_time();
+        const bool timeout = _cfg->log_batch_timeout_ms > 0 &&
+                             now - batch_start_us >=
+                                 (uint64_t)_cfg->log_batch_timeout_ms * 1000ull;
+        const bool backpressure =
+            xRingbufferGetCurFreeSize(log_rb) < _cfg->log_rb_flush_at;
+        if (timeout || backpressure) {
+            flush_batch();
+        }
     }
 
     // Drop visibility: surface accumulated drops as a WARN packet through
@@ -185,25 +232,95 @@ void soulcloud::log_sender::drain()
     }
 }
 
+bool soulcloud::log_sender::throttle_ok()
+{
+    // throttle to the configured rate (publishes/s): one container or one
+    // raw packet consumes one token
+    const uint64_t interval_us = 1000000ull / _cfg->log_rate_per_s;
+    const uint64_t now = (uint64_t)esp_timer_get_time();
+    if (now - last_sent_us < interval_us) {
+        return false;
+    }
+    last_sent_us = now;
+    return true;
+}
+
+bool soulcloud::log_sender::batch_append(const uint8_t *pkt, size_t len)
+{
+    if (len == 0 || batch_elems >= BATCH_MAX_ELEMS) {
+        return false;
+    }
+    // element head: bin8 (2 B, len <= 255) or bin16 (3 B)
+    const size_t hdr = len <= 255 ? 2u : 3u;
+    if (batch_len + hdr + len > BATCH_MAX_BYTES) {
+        return false;
+    }
+    if (batch_elems == 0) {
+        batch_start_us = (uint64_t)esp_timer_get_time();
+    }
+    uint8_t *dst = batch + 4 + batch_len;
+    if (len <= 255) {
+        dst[0] = 0xc4;
+        dst[1] = (uint8_t)len;
+    } else {
+        dst[0] = 0xc5;
+        dst[1] = (uint8_t)(len >> 8);
+        dst[2] = (uint8_t)(len & 0xff);
+    }
+    memcpy(dst + hdr, pkt, len);
+    batch_len += hdr + len;
+    batch_elems++;
+    return true;
+}
+
+void soulcloud::log_sender::flush_batch()
+{
+    if (batch_elems == 0 || _bridge == nullptr || _cfg == nullptr) {
+        return;
+    }
+    // the container consumes one rate-limit token, like a raw packet
+    if (!throttle_ok()) {
+        return;  // retried on the next drain tick (batch is kept)
+    }
+    // container head: 0x01 + fixarray (<= 15) or array16
+    size_t total = 0;
+    if (batch_elems <= 15) {
+        memmove(batch + 2, batch + 4, batch_len);  // compact head to 2 B
+        batch[0] = 0x01;
+        batch[1] = (uint8_t)(0x90 | batch_elems);
+        total = 2 + batch_len;
+    } else {
+        batch[0] = 0x01;
+        batch[1] = 0xdc;
+        batch[2] = (uint8_t)(batch_elems >> 8);
+        batch[3] = (uint8_t)(batch_elems & 0xff);
+        total = 4 + batch_len;
+    }
+
+    char topic[160] = {};
+    topic_log(topic, sizeof(topic), _cfg->device_uid);
+    const int32_t msg_id = _bridge->publish(topic, batch, total, 1);
+    if (msg_id < 0) {
+        dropped_count++;
+    }
+    batch_len = 0;
+    batch_elems = 0;
+}
+
 void soulcloud::log_sender::send_packet(const uint8_t *pkt, size_t len)
 {
     if (_bridge == nullptr || _cfg == nullptr || !_bridge->is_connected()) {
         dropped_count++;
         return;
     }
-
-    // throttle to the configured rate (msg/s)
-    const uint64_t interval_us = 1000000ull / _cfg->log_rate_per_s;
-    const uint64_t now = (uint64_t)esp_timer_get_time();
-    if (now - last_sent_us < interval_us) {
+    if (!throttle_ok()) {
         dropped_count++;
         return;
     }
-    last_sent_us = now;
 
     char topic[160] = {};
     topic_log(topic, sizeof(topic), _cfg->device_uid);
-    const int32_t msg_id = _bridge->publish(topic, pkt, len, 0);
+    const int32_t msg_id = _bridge->publish(topic, pkt, len, 1);  // QoS 1 per protocol
     if (msg_id < 0) {
         dropped_count++;
     }

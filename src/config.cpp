@@ -93,6 +93,11 @@ esp_err_t soulcloud::config_store::load(config *out)
         .mqtt_reconnect_timeout_ms = CONFIG_SOULCLOUD_MQTT_RECONNECT_TIMEOUT_MS,
         .ota_max_bytes = CONFIG_SOULCLOUD_OTA_MAX_BYTES,
         .ota_timeout_s = CONFIG_SOULCLOUD_OTA_TIMEOUT_S,
+        .log_rb_size = CONFIG_SOULCLOUD_LOG_RB_SIZE,
+        .log_rb_internal = CONFIG_SOULCLOUD_LOG_RB_MEM_INTERNAL,
+        .log_rb_flush_at = CONFIG_SOULCLOUD_LOG_RB_FLUSH_AT,
+        .log_batch_count = CONFIG_SOULCLOUD_LOG_BATCH_COUNT,
+        .log_batch_timeout_ms = CONFIG_SOULCLOUD_LOG_BATCH_TIMEOUT_MS,
         .device_uid = CONFIG_SOULCLOUD_DEVICE_UID,
         .device_password = CONFIG_SOULCLOUD_DEVICE_PASSWORD,
         .serial = "",
@@ -133,6 +138,15 @@ esp_err_t soulcloud::config_store::load(config *out)
                                        65536, 67108864, &changed);
         out->ota_timeout_s = clamp_u32(load_u32(h, KEY_OTA_TO, defaults.ota_timeout_s),
                                        1, 3600, &changed);
+        out->log_rb_size = clamp_u32(load_u32(h, KEY_LOG_RB_SIZE, defaults.log_rb_size),
+                                     1024, 262144, &changed);
+        out->log_rb_internal = load_u32(h, KEY_LOG_RB_INT, defaults.log_rb_internal ? 1u : 0u) != 0;
+        out->log_rb_flush_at = clamp_u32(load_u32(h, KEY_LOG_RB_FLUSH, defaults.log_rb_flush_at),
+                                         256, out->log_rb_size, &changed);
+        out->log_batch_count = clamp_u32(load_u32(h, KEY_LOG_BATCH_CNT, defaults.log_batch_count),
+                                         1, 4096, &changed);
+        out->log_batch_timeout_ms = clamp_u32(load_u32(h, KEY_LOG_BATCH_TO, defaults.log_batch_timeout_ms),
+                                              0, 60000, &changed);
         nvs_close(h);
     }
 
@@ -151,6 +165,11 @@ esp_err_t soulcloud::config_store::load(config *out)
             nvs_set_u32(wh, KEY_RECONN, out->mqtt_reconnect_timeout_ms);
             nvs_set_u32(wh, KEY_OTA_MAX, out->ota_max_bytes);
             nvs_set_u32(wh, KEY_OTA_TO, out->ota_timeout_s);
+            nvs_set_u32(wh, KEY_LOG_RB_SIZE, out->log_rb_size);
+            nvs_set_u32(wh, KEY_LOG_RB_INT, out->log_rb_internal ? 1u : 0u);
+            nvs_set_u32(wh, KEY_LOG_RB_FLUSH, out->log_rb_flush_at);
+            nvs_set_u32(wh, KEY_LOG_BATCH_CNT, out->log_batch_count);
+            nvs_set_u32(wh, KEY_LOG_BATCH_TO, out->log_batch_timeout_ms);
             nvs_commit(wh);
             nvs_close(wh);
             ESP_LOGW(TAG, "NVS scalars out of range; clamped and rewritten");

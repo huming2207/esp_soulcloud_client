@@ -414,4 +414,32 @@ namespace soulcloud
      * @return ERR_OK or a negative protocol_err.
      */
     int32_t encode_ota_result(uint8_t *buf, size_t cap, size_t *out_len, const ota_result *res);
+
+    // ------------------------------------------------------------------ //
+    // log uplink container (PROTOCOL.log-packaging.md)
+    // ------------------------------------------------------------------ //
+
+    /** Max elements per log container (platform binding). */
+    static constexpr uint32_t LOG_CONTAINER_MAX_ELEMS = 4096;
+
+    /**
+     * @brief Encodes an aggregated log container (type 0x01): a MessagePack
+     *        array of binary blobs, each a complete on9log packet.
+     *
+     * Byte layout (PROTOCOL.log-packaging.md §3):
+     *   0x01, array header, then per element: bin8/bin16 header + packet.
+     *   0x01 + fixarray (n <= 15) or 0x01 + array16 (n > 15).
+     *
+     * @param[in]  buf     Destination buffer (borrowed).
+     * @param[in]  cap     Buffer capacity.
+     * @param[out] out_len Encoded length (including the type byte).
+     * @param[in]  pkts    Packet pointers (each must start with 0x9a).
+     * @param[in]  lens    Packet lengths (must be > 0).
+     * @param[in]  n       Element count (1..LOG_CONTAINER_MAX_ELEMS).
+     * @return ERR_OK, ERR_OVERFLOW (empty/too many elements/cap too small),
+     *         or ERR_BAD_MSG (empty element or bad magic).
+     */
+    int32_t encode_log_container(uint8_t *buf, size_t cap, size_t *out_len,
+                                 const uint8_t *const *pkts, const size_t *lens,
+                                 uint32_t n);
 }  // namespace soulcloud

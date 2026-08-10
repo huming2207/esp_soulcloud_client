@@ -29,7 +29,9 @@ namespace soulcloud
      *
      * Populated by config_store::load(). Scalar tunables are laid out
      * first (alignment-friendly); the string members are all 4-byte
-     * multiples, so the struct has no padding.
+     * multiples. The bool log_rb_internal sits between u32 members and
+     * introduces padding; the struct is never serialized raw, so this is
+     * only a size note, not a correctness issue.
      */
     struct config
     {
@@ -42,6 +44,11 @@ namespace soulcloud
         uint32_t mqtt_reconnect_timeout_ms; /**< esp-mqtt auto-reconnect interval, ms. */
         uint32_t ota_max_bytes;             /**< Reject OTA images larger than this. */
         uint32_t ota_timeout_s;             /**< Per-download watchdog, seconds. */
+        uint32_t log_rb_size;               /**< Log ring buffer size, bytes. */
+        bool log_rb_internal;               /**< true = internal SRAM, false = PSRAM. */
+        uint32_t log_rb_flush_at;           /**< Flush batch when free space < this, bytes. */
+        uint32_t log_batch_count;           /**< Packets per log publish; 1 = disabled. */
+        uint32_t log_batch_timeout_ms;      /**< Force-flush timeout with a non-empty batch; 0 = off. */
 
         char device_uid[128];      /**< MQTT username + client ID (no '/' '+' '#' or whitespace). */
         char device_password[128]; /**< MQTT credential (issued by the backend). */
@@ -125,6 +132,11 @@ namespace soulcloud
         static constexpr char KEY_RECONN[] = "reconn";
         static constexpr char KEY_OTA_MAX[] = "ota_max";
         static constexpr char KEY_OTA_TO[] = "ota_to";
+        static constexpr char KEY_LOG_RB_SIZE[] = "rb_size";
+        static constexpr char KEY_LOG_RB_INT[] = "rb_int";
+        static constexpr char KEY_LOG_RB_FLUSH[] = "rb_flush";
+        static constexpr char KEY_LOG_BATCH_CNT[] = "batch_cnt";
+        static constexpr char KEY_LOG_BATCH_TO[] = "batch_to";
 
         static constexpr char NVS_NAMESPACE[] = "soulcloud";
 
