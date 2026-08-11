@@ -99,6 +99,21 @@ namespace soulcloud
          */
         void drain();
 
+        /**
+         * @brief Register a core-task wake callback (task notification).
+         *
+         * Called after a packet is enqueued so the event-driven core task
+         * wakes instead of polling; optional (NULL = polling only).
+         */
+        void set_wake(void (*cb)(void *ctx), void *ctx);
+
+        /**
+         * @brief Absolute deadline (us) for flushing the current batch.
+         * @return 0 when batching is disabled, the batch is empty, or the
+         *         timeout is 0; otherwise batch_start + timeout.
+         */
+        uint64_t batch_deadline_us() const;
+
     private:
         log_sender() = default;
 
@@ -135,6 +150,8 @@ namespace soulcloud
         size_t batch_len = 0;        // element bytes accumulated
         uint32_t batch_elems = 0;
         uint64_t batch_start_us = 0;  // when the batch started (timeout base)
+        void (*wake_cb)(void *ctx) = nullptr;  // core-task notification
+        void *wake_ctx = nullptr;
 
         bool batch_append(const uint8_t *pkt, size_t len);
         void flush_batch();

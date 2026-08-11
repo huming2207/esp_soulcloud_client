@@ -155,12 +155,110 @@ public:
         static_cast<client_impl *>(ctx)->run();
     }
 
+    /**
+     * Wakes the core task via a task notification.
+     *
+     * Task-context only (the SMP kernel takes a kernel spinlock inside
+     * xTaskGenericNotify; an ISR would need the FromISR variant). Must
+     * never be called after run() self-deletes: `task` is volatile and
+     * cleared right before vTaskDelete, so a racing producer simply
+     * skips the wake (the consumer is gone). Notifications coalesce,
+     * which is fine because every wake drains both queues completely.
+     */
+    void wake_core()
+    {
+        if (task != nullptr) {
+            xTaskNotifyGive(task);
+        }
+    }
+
+    /** Trampoline for log_sender::set_wake (called from the log source's
+     *  task after a successful enqueue). */
+    static void wake_cb_trampoline(void *ctx)
+    {
+        static_cast<client_impl *>(ctx)->wake_core();
+    }
+
+    /**
+     * Computes how long run() may block in xTaskNotifyWait before it must
+     * wake up on its own: the earliest of
+     *   - the periodic stat deadline (next_stat_us),
+     *   - the SUBACK watchdog deadline (10 s after the last subscribe
+     *     issue, only for subscriptions that are actually in flight), and
+     *   - the log batch force-flush deadline (batch_start + timeout).
+     * Returns 0 when work is already due (do not block), or portMAX_DELAY
+     * when nothing is scheduled (block until the next notification).
+     */
+    uint32_t deadline_wait_ticks() const
+    {
+        uint32_t wait_ticks = portMAX_DELAY;
+        const uint64_t now = (uint64_t)esp_timer_get_time();
+
+        // periodic stat: report on the core task (never on esp_timer)
+        if (owner.started) {
+            if (now >= next_stat_us) {
+                return 0;
+            }
+            const uint32_t t = (uint32_t)pdMS_TO_TICKS((next_stat_us - now) / 1000ull) + 1;
+            if (t < wait_ticks) {
+                wait_ticks = t;
+            }
+        }
+
+        // SUBACK watchdog: only subscriptions with a live message id are
+        // time-bound; ids < 0 (not connected, or subscribe refused) are
+        // re-issued on the next connect/notification instead
+        for (const auto &sub : subs) {
+            if (sub.done.load(std::memory_order_relaxed)) {
+                continue;
+            }
+            const int mid = sub.msg_id.load(std::memory_order_relaxed);
+            const uint64_t sent = sub.sent_us.load(std::memory_order_relaxed);
+            if (mid >= 0 && sent > 0) {
+                const uint64_t due = sent + 10 * 1000000ull;
+                if (now >= due) {
+                    return 0;
+                }
+                const uint32_t t = (uint32_t)pdMS_TO_TICKS((due - now) / 1000ull) + 1;
+                if (t < wait_ticks) {
+                    wait_ticks = t;
+                }
+            }
+        }
+
+        // log batch force-flush deadline (batching mode only). While
+        // disconnected the batch is intentionally kept (drain() returns
+        // early), so no deadline is scheduled at all: the reconnect wake
+        // handles the flush. While connected, a due batch returns 1 tick
+        // instead of 0: flush_batch may be held by the rate limiter, and
+        // spinning at 0 would busy-loop the core task for the whole
+        // throttle window.
+        const uint64_t batch_due = soulcloud::log_sender::instance().batch_deadline_us();
+        if (batch_due != 0 && bridge.is_connected()) {
+            if (now >= batch_due) {
+                return 1;
+            }
+            const uint32_t t = (uint32_t)pdMS_TO_TICKS((batch_due - now) / 1000ull) + 1;
+            if (t < wait_ticks) {
+                wait_ticks = t;
+            }
+        }
+
+        return wait_ticks;
+    }
+
     void run()
     {
         for (;;) {
-            // Ring buffers are polled with zero-tick receives (empty is a
-            // NULL return), so no wake-up signalling is needed; a 1-tick
-            // delay keeps the poll cheap and bounds latency.
+            // Event-driven wait (ESP-07): block until a producer notifies
+            // us (log sink enqueue, inbound MQTT message, connect event,
+            // teardown) or the earliest scheduled deadline elapses. No
+            // polling: idle wakeups drop from 100/s to ~0, and latency is
+            // bounded by the producer's notify instead of a 10 ms tick.
+            const uint32_t wait_ticks = deadline_wait_ticks();
+            uint32_t notified = 0;
+            xTaskNotifyWait(0, ULONG_MAX, &notified, wait_ticks);
+            (void)notified;  // spurious wakes are harmless: drains are cheap
 
             // drain inbound (commands/OTA) without blocking
             size_t len = 0;
@@ -244,9 +342,9 @@ public:
             if (exit) {
                 break;
             }
-            vTaskDelay(1);  // 1 RTOS tick poll interval
+            // loop back into xTaskNotifyWait (no fixed delay)
         }
-        task = nullptr;  // tell destroy() we are gone (before self-delete)
+        task = nullptr;  // tell destroy()/wake_core() we are gone
         vTaskDelete(nullptr);
     }
 
@@ -277,13 +375,16 @@ public:
 
         if (impl->task != nullptr) {
             impl->exit = true;
-            // the task polls the ring buffer on a short timeout, so it wakes
-            // up and self-deletes; wait briefly for it to finish
+            impl->wake_core();  // the task blocks in xTaskNotifyWait; nudge it
+            // wait briefly for it to self-delete
             for (uint32_t i = 0; i < 100 && impl->task != nullptr; ++i) {
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
             if (impl->task != nullptr) {
-                vTaskDelete(impl->task);  // forced (should not happen)
+                // forced (should not happen): first detach the log sink's
+                // wake callback so no producer can notify a dead task
+                soulcloud::log_sender::instance().set_wake(nullptr, nullptr);
+                vTaskDelete(impl->task);
             }
             impl->task = nullptr;
         }
@@ -390,6 +491,9 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
         client_impl::destroy(*this);
         return err;
     }
+    // wake the core task whenever a log packet is enqueued, so the
+    // event-driven consumer drains immediately instead of polling
+    soulcloud::log_sender::instance().set_wake(client_impl::wake_cb_trampoline, impl);
 
     err = soulcloud::ota_executor::instance().init(&_cfg, &impl->bridge);
     if (err != ESP_OK) {
@@ -519,6 +623,11 @@ void soulcloud::soulcloud_client::on_mqtt_connected()
     }
 
     ESP_LOGI(TAG, "connected; downlink subscriptions pending");
+
+    // wake the core task so it drains log packets buffered during the
+    // outage (drain() returns early while disconnected, leaving the
+    // ring buffer intact) and re-evaluates the SUBACK watchdog
+    impl->wake_core();
     report_stat();
 
     // First successful connect after an OTA reboot = the new firmware is
@@ -568,6 +677,9 @@ void soulcloud::soulcloud_client::on_subscribed(int msg_id, int return_code, boo
         if (failed || return_code >= 0x80) {
             ESP_LOGW(TAG, "subscribe rejected (rc=%d); will retry", return_code);
             sub.retry.store(true, std::memory_order_relaxed);
+            // wake the core task so the retry happens now instead of
+            // waiting for the 10 s watchdog deadline
+            impl->wake_core();
         } else {
             sub.done.store(true, std::memory_order_relaxed);
         }
@@ -628,10 +740,14 @@ void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_l
     memcpy(item, &hdr, sizeof(hdr));
     memcpy(item + sizeof(hdr), data, data_len);
 
-    // bounded wait for a free slot (backpressure); drop when full
-    // (QoS1 redelivery covers commands, the server re-issues OTA notices)
+    // bounded wait for a free slot (backpressure); drop when full.
+    // NOTE: the esp-mqtt layer will PUBACK regardless of what happens
+    // here, so drops are observable only via this log line (see the
+    // ESP-03(c) notes); commands get an error result from the core.
     if (xRingbufferSend(impl->inbound_rb, item, item_len, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGW(TAG, "inbound ring buffer full; dropping %u-byte message", (unsigned)data_len);
+    } else {
+        impl->wake_core();  // drain the queue immediately (event-driven)
     }
     heap_caps_free(item);
 }

@@ -104,6 +104,8 @@ void soulcloud::log_sender::deinit()
     packet_active = false;
     batch_len = 0;
     batch_elems = 0;
+    wake_cb = nullptr;
+    wake_ctx = nullptr;
     xSemaphoreGive(mtx);
 }
 
@@ -160,11 +162,14 @@ void soulcloud::log_sender::sink_end(void *ctx)
         // producer side: zero-tick enqueue; a full ring buffer drops the
         // packet (logs are lossy), the consumer drains in order. A drop
         // of the drop-notification itself is not counted (re-entrancy
-        // guard, see drain()).
+        // guard, see drain()). After a successful enqueue, wake the core
+        // task so it drains immediately instead of polling.
         if (xRingbufferSend(self->log_rb, self->packet, self->packet_len, 0) != pdTRUE) {
             if (!self->drop_notify_inflight) {
                 self->dropped_count++;
             }
+        } else if (self->wake_cb != nullptr) {
+            self->wake_cb(self->wake_ctx);
         }
     }
     xSemaphoreGive(self->_sink_mutex);
@@ -242,6 +247,21 @@ void soulcloud::log_sender::drain()
             drop_notify_inflight = false;
         }
     }
+}
+
+void soulcloud::log_sender::set_wake(void (*cb)(void *ctx), void *ctx)
+{
+    wake_cb = cb;
+    wake_ctx = ctx;
+}
+
+uint64_t soulcloud::log_sender::batch_deadline_us() const
+{
+    if (_cfg == nullptr || _cfg->log_batch_count <= 1 ||
+        _cfg->log_batch_timeout_ms == 0 || batch_elems == 0) {
+        return 0;
+    }
+    return batch_start_us + (uint64_t)_cfg->log_batch_timeout_ms * 1000ull;
 }
 
 bool soulcloud::log_sender::throttle_ok()
