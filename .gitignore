@@ -1,1 +1,3 @@
 tests/host/out/
+build/
+cmake-build-*/
