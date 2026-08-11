@@ -545,8 +545,12 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
         return ESP_ERR_INVALID_ARG;
     }
     TaskHandle_t task = nullptr;
+    uint32_t task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+#if CONFIG_SOULCLOUD_CORE_TASK_STACK_PSRAM
+    task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#endif
     err = xTaskCreateWithCaps(client_impl::task_main, "soulcloud_core", CONFIG_SOULCLOUD_CORE_TASK_STACK, impl, 5, &task,
-                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                              task_caps);
     impl->task = task;
     if (err != pdPASS) {
         client_impl::destroy(*this);

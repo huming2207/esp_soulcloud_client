@@ -99,8 +99,24 @@ menu "Soulcloud client"
             Stack for the dedicated task that dispatches inbound commands
             and OTA notices. Handlers are application code and may use
             deep stacks, so this must NOT run on the small esp-mqtt or
-            esp_timer task stacks (defaults 6144/3584 bytes). The task is
-            allocated from PSRAM when available.
+            esp_timer task stacks (defaults 6144/3584 bytes).
+
+    choice SOULCLOUD_CORE_TASK_STACK_MEMORY
+        prompt "Client core task stack memory"
+        default SOULCLOUD_CORE_TASK_STACK_INTERNAL
+        help
+            Internal SRAM is always safe when flash cache is disabled.
+            PSRAM preserves internal memory, but the application must route
+            every flash operation (including NVS used by command handlers)
+            through an internal-stack worker such as esp_flash_dispatcher.
+
+        config SOULCLOUD_CORE_TASK_STACK_INTERNAL
+            bool "Internal SRAM"
+
+        config SOULCLOUD_CORE_TASK_STACK_PSRAM
+            bool "PSRAM"
+            depends on FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    endchoice
 
     config SOULCLOUD_LOG_RB_SIZE
         int "Log ring buffer size (bytes)"
