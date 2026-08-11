@@ -376,8 +376,14 @@ public:
         if (impl->task != nullptr) {
             impl->exit = true;
             impl->wake_core();  // the task blocks in xTaskNotifyWait; nudge it
-            // wait briefly for it to self-delete
-            for (uint32_t i = 0; i < 100 && impl->task != nullptr; ++i) {
+            // Wait generously (30 s): the core task may be inside
+            // esp_mqtt_client_publish(), which blocks for up to the
+            // network timeout, and deleting it there would corrupt the
+            // esp-mqtt client state for the subsequent bridge.deinit()
+            // (ESP-R5). Command handlers are application code and may
+            // legitimately take long too. The forced delete below is a
+            // last resort for a wedged task.
+            for (uint32_t i = 0; i < 3000 && impl->task != nullptr; ++i) {
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
             if (impl->task != nullptr) {
@@ -465,13 +471,17 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
         client_impl::destroy(*this);
         return ESP_ERR_NO_MEM;
     }
-    // NOSPLIT: largest storable item is ~half the buffer; warn when the
-    // configured buffer cannot hold a maximum-size inbound record.
+    // NOSPLIT stores items whole; the largest storable item is roughly
+    // half the buffer. Refuse to run with a configuration where a legal
+    // maximum-size record can never be queued (permanent silent drops).
     if (CONFIG_SOULCLOUD_INBOUND_RB_SIZE <
         2 * (sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX)) {
-        ESP_LOGW(TAG, "SOULCLOUD_INBOUND_RB_SIZE %d too small for "
-                      "maximum-size inbound records (NOSPLIT half-buffer limit)",
-                 CONFIG_SOULCLOUD_INBOUND_RB_SIZE);
+        ESP_LOGE(TAG, "SOULCLOUD_INBOUND_RB_SIZE %d too small: must be >= %u "
+                      "(NOSPLIT half-buffer limit)",
+                 CONFIG_SOULCLOUD_INBOUND_RB_SIZE,
+                 2u * (unsigned)(sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX));
+        client_impl::destroy(*this);
+        return ESP_ERR_INVALID_ARG;
     }
     TaskHandle_t task = nullptr;
     err = xTaskCreateWithCaps(client_impl::task_main, "soulcloud_core",
@@ -688,6 +698,9 @@ void soulcloud::soulcloud_client::on_subscribed(int msg_id, int return_code, boo
     if (impl->subs[0].done.load(std::memory_order_relaxed) &&
         impl->subs[1].done.load(std::memory_order_relaxed)) {
         impl->downlink_ready.store(true, std::memory_order_relaxed);
+        // explicit readiness line for the harness and operators; the E2E
+        // tests wait for this instead of the (removed) "subscribed" log
+        ESP_LOGI(TAG, "downlink ready (cmd/exec + ota subscribed)");
     }
 }
 
@@ -754,9 +767,29 @@ void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_l
 
 void soulcloud::soulcloud_client::dispatch_command(const uint8_t *payload, size_t len)
 {
-    // commands are paused during OTA
+    // Commands are paused during OTA, but never silently dropped: the
+    // broker has already PUBACKed the message and would otherwise wait
+    // forever for a result (default delivery timeout = never). Answer
+    // with a busy result so the platform can act explicitly.
     if (soulcloud::ota_executor::instance().is_active()) {
-        ESP_LOGD(TAG, "command ignored: OTA in progress");
+        uint8_t id[16] = {};
+        uint64_t seq = 0;
+        if (decode_command_id(payload, len, id, &seq) == ERR_OK) {
+            command_result result = {};
+            result.id = id;
+            result.seq = seq;
+            result.args = nullptr;
+            result.arg_count = 0;
+            result.code = soulcloud::command_registry::CMD_RESULT_ERR_BUSY;  // -4
+            uint8_t buf[1024] = {};
+            size_t out_len = 0;
+            if (encode_command_result(buf, sizeof(buf), &out_len, &result) == ERR_OK) {
+                char topic[160] = {};
+                topic_cmd_result(topic, sizeof(topic), _cfg.device_uid);
+                impl->bridge.publish(topic, buf, out_len, 1);
+            }
+        }
+        ESP_LOGD(TAG, "command rejected: OTA in progress (busy result)");
         return;
     }
     uint8_t result_buf[1024] = {};

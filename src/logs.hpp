@@ -145,7 +145,10 @@ namespace soulcloud
         // accumulate from batch+4. On flush, <=15 elements compact the
         // head to 0x01 + fixarray (memmove) and 16+ keep array16.
         static constexpr uint32_t BATCH_MAX_BYTES = 4096;  // container budget
-        static constexpr uint32_t BATCH_MAX_ELEMS = 128;   // doc-suggested cap
+        // Cap matches the backend's per-element rate bucket (100 burst):
+        // the broker charges one token per ELEMENT, so a larger container
+        // could never be accepted even with a full bucket (ESP-R3).
+        static constexpr uint32_t BATCH_MAX_ELEMS = 100;
         uint8_t batch[4 + BATCH_MAX_BYTES] = {};
         size_t batch_len = 0;        // element bytes accumulated
         uint32_t batch_elems = 0;
@@ -156,6 +159,7 @@ namespace soulcloud
         bool batch_append(const uint8_t *pkt, size_t len);
         void flush_batch();
         bool throttle_ok();
+        bool rate_credit() const;  // limiter has credit right now
 
         static void sink_start(const uint8_t *header, size_t header_len, void *ctx);
         static void sink_payload(const uint8_t *payload, size_t payload_len,

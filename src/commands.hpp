@@ -47,6 +47,11 @@ namespace soulcloud
          *  timeout. */
         static constexpr int32_t CMD_RESULT_ERR_DECODE = -3;
 
+        /** Result code for a command rejected because OTA is in progress
+         *  (device busy); the platform records it as an explicit terminal
+         *  failure instead of waiting for a result that never comes. */
+        static constexpr int32_t CMD_RESULT_ERR_BUSY = -4;
+
         command_registry(const command_registry &) = delete;
         command_registry &operator=(const command_registry &) = delete;
 

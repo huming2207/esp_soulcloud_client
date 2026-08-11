@@ -55,22 +55,30 @@ void soulcloud::ota_executor::deinit()
     // normally ends within ota_timeout_s; the forced delete below is a
     // last resort that leaks the HTTP/OTA handles but is safe against
     // NULL derefs (and deinit is a terminating operation anyway).
-    if (task != nullptr) {
+    // Wait for an in-flight OTA task to finish or park (`active` is the
+    // task's exit signal; the task parks instead of self-deleting, so
+    // the handle is always live and vTaskDelete below is always safe —
+    // both for a parked task and for one still running past the budget).
+    if (task.load(std::memory_order_acquire) != nullptr ||
+        active.load(std::memory_order_acquire)) {
         const uint32_t budget_ms =
             1000u + (uint32_t)(_cfg != nullptr ? _cfg->ota_timeout_s : 0) * 1000u;
         uint32_t waited = 0;
-        while (task != nullptr && waited < budget_ms) {
+        while (active.load(std::memory_order_acquire) && waited < budget_ms) {
             vTaskDelay(pdMS_TO_TICKS(10));
             waited += 10;
         }
-        if (task != nullptr) {
+        if (active.load(std::memory_order_acquire)) {
             ESP_LOGW(TAG, "OTA task still running after %lu ms; force-deleting",
                      (unsigned long)budget_ms);
-            vTaskDelete(task);
         }
-        task = nullptr;
+        const TaskHandle_t h = task.load(std::memory_order_acquire);
+        if (h != nullptr) {
+            vTaskDelete(h);  // safe: parked or running, never dead
+        }
+        task.store(nullptr, std::memory_order_release);
     }
-    active = false;
+    active.store(false, std::memory_order_release);
     _cfg = nullptr;
     _bridge = nullptr;
 }
@@ -183,15 +191,26 @@ esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
     snprintf(pending.download_url, sizeof(pending.download_url), "%s", notice->download_url);
     snprintf(pending.download_token, sizeof(pending.download_token), "%s", notice->download_token);
 
-    active = true;
+    // Reap a task left parked by a previous failed OTA (safe: a parked
+    // task is alive; vTaskDelete on it simply removes it).
+    const TaskHandle_t old_task = task.load(std::memory_order_acquire);
+    if (old_task != nullptr) {
+        vTaskDelete(old_task);
+        task.store(nullptr, std::memory_order_release);
+    }
+
+    active.store(true, std::memory_order_release);
     TaskHandle_t created_task = nullptr;
     const BaseType_t created = xTaskCreate(task_trampoline, "soulcloud_ota",
                                            TASK_STACK, this, TASK_PRIORITY, &created_task);
     if (created != pdPASS) {
-        active = false;
+        active.store(false, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
-    task = created_task;
+    // Publish the handle. The task never self-deletes (it parks), so the
+    // handle stays valid until deinit()/start() reap it — no stale-handle
+    // window even for a fast failure.
+    task.store(created_task, std::memory_order_release);
     return ESP_OK;
 }
 
@@ -382,6 +401,20 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     return true;
 }
 
+/**
+ * Blocks forever after an OTA failure. The task never self-deletes, so
+ * the handle published by start() stays valid for the whole lifetime:
+ * deinit() (and the next start()) reap it with vTaskDelete, which is
+ * safe for a blocked task. This closes the delete-liveness TOCTOU that
+ * a self-deleting task had (the handle could die between deinit's
+ * active-check and its vTaskDelete).
+ */
+void soulcloud::ota_executor::park_and_wait_for_reap()
+{
+    uint32_t dummy = 0;
+    xTaskNotifyWait(0, 0, &dummy, portMAX_DELAY);
+}
+
 void soulcloud::ota_executor::run()
 {
     ESP_LOGI(TAG, "OTA start: release %s, %u bytes",
@@ -395,9 +428,8 @@ void soulcloud::ota_executor::run()
     if (!download_and_verify(&ota_handle, &partition, &total, &fail)) {
         ESP_LOGE(TAG, "OTA failed: %s", fail.msg);
         report_state("failed", fail.code, fail.msg);
-        active = false;
-        task = nullptr;
-        vTaskDelete(nullptr);
+        active.store(false, std::memory_order_release);
+        park_and_wait_for_reap();  // never self-delete: the handle must stay live
         return;
     }
     ESP_LOGI(TAG, "sha256 verified (%zu bytes)", total);
@@ -407,9 +439,8 @@ void soulcloud::ota_executor::run()
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
         report_state("failed", err == ESP_ERR_OTA_VALIDATE_FAILED ? -4 : -3, "image invalid");
-        active = false;
-        task = nullptr;
-        vTaskDelete(nullptr);
+        active.store(false, std::memory_order_release);
+        park_and_wait_for_reap();
         return;
     }
 
@@ -417,9 +448,8 @@ void soulcloud::ota_executor::run()
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
         report_state("failed", -3, "boot switch failed");
-        active = false;
-        task = nullptr;
-        vTaskDelete(nullptr);
+        active.store(false, std::memory_order_release);
+        park_and_wait_for_reap();
         return;
     }
 

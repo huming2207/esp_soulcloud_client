@@ -48,12 +48,16 @@ esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
         return ESP_ERR_NO_MEM;
     }
     // NOSPLIT stores items whole; the largest storable item is roughly
-    // half the buffer. Smaller buffers silently drop every packet above
-    // that (counted, so visible via the drop WARN, but worth a warning).
+    // half the buffer. Refuse to run with a configuration where a legal
+    // maximum-size packet can never be queued (permanent silent drops).
     if (_cfg->log_rb_size < 2 * PACKET_MAX) {
-        ESP_LOGW(TAG, "log_rb_size %lu < 2*PACKET_MAX (%u): packets near "
-                      "%u bytes can never be queued (NOSPLIT half-buffer limit)",
-                 (unsigned long)_cfg->log_rb_size, PACKET_MAX, PACKET_MAX);
+        vRingbufferDelete(log_rb);
+        log_rb = nullptr;
+        _sink_mutex = nullptr;
+        ESP_LOGE(TAG, "log_rb_size %lu too small: must be >= %u "
+                      "(NOSPLIT half-buffer limit, PACKET_MAX=%u)",
+                 (unsigned long)_cfg->log_rb_size, 2u * PACKET_MAX, PACKET_MAX);
+        return ESP_ERR_INVALID_ARG;
     }
 
     const on9log_sink_t sink = {
@@ -208,6 +212,14 @@ void soulcloud::log_sender::drain()
                     flush_batch();
                 }
             } else {
+                // single-packet mode: if the rate limiter has no credit,
+                // stop consuming and leave the rest in the ring buffer —
+                // bursts are smoothed across ticks instead of being
+                // removed and dropped (ESP-R4)
+                if (!rate_credit()) {
+                    vRingbufferReturnItem(log_rb, item);
+                    break;
+                }
                 send_packet(item, len);  // throttled publish (may drop)
             }
         }
@@ -275,6 +287,17 @@ bool soulcloud::log_sender::throttle_ok()
     }
     last_sent_us = now;
     return true;
+}
+
+/** @return true when the caller may publish now (rate credit available). */
+bool log_sender::rate_credit() const
+{
+    if (_cfg == nullptr) {
+        return false;
+    }
+    const uint64_t interval_us = 1000000ull / _cfg->log_rate_per_s;
+    const uint64_t now = (uint64_t)esp_timer_get_time();
+    return now - last_sent_us >= interval_us;
 }
 
 bool soulcloud::log_sender::batch_append(const uint8_t *pkt, size_t len)
