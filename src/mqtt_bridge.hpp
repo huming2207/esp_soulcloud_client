@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 
 #include <esp_err.h>
 #include <mqtt_client.h>
@@ -24,17 +25,16 @@ namespace soulcloud
      * All callbacks run on the esp-mqtt task and must be quick; the
      * payload/topic pointers are valid only for the duration of the call.
      */
-    struct mqtt_callbacks
-    {
-        void (*on_connected)(void *ctx);   /**< MQTT session established. */
+    struct mqtt_callbacks {
+        void (*on_connected)(void *ctx);    /**< MQTT session established. */
         void (*on_disconnected)(void *ctx); /**< MQTT session dropped. */
-        void (*on_data)(void *ctx, const char *topic, size_t topic_len,
-                        const uint8_t *data, size_t data_len); /**< Inbound PUBLISH (complete, reassembled). */
+        void (*on_data)(void *ctx, const char *topic, size_t topic_len, const uint8_t *data,
+                        size_t data_len); /**< Inbound PUBLISH (complete, reassembled). */
         void (*on_subscribed)(void *ctx, int msg_id, int return_code, bool failed);
         /**< SUBACK for a subscribe (return_code per topic, >=0x80 = rejected),
          *  or a SUBSCRIBE_FAILED error (failed=true, return_code=-1). */
         void (*on_error)(void *ctx, esp_mqtt_error_codes_t *err); /**< Transport error (may be NULL). */
-        void *ctx; /**< Opaque context passed to every callback. */
+        void *ctx;                                                /**< Opaque context passed to every callback. */
     };
 
     /**
@@ -72,7 +72,10 @@ namespace soulcloud
         esp_err_t stop();
 
         /** @return true while the MQTT session is established. */
-        bool is_connected() const { return connected; }
+        bool is_connected() const
+        {
+            return connected.load(std::memory_order_acquire);
+        }
 
         /**
          * @brief Subscribe to a topic at the given QoS.
@@ -106,8 +109,8 @@ namespace soulcloud
     private:
         esp_mqtt_client_handle_t client = nullptr;
         esp_mqtt_client_config_t mqtt_cfg = {};
-        bool started = false;
-        bool connected = false;
+        std::atomic<bool> started{false};
+        std::atomic<bool> connected{false};
         mqtt_callbacks _cbs = {};
 
         // ---- MQTT fragment reassembly ----
@@ -116,8 +119,7 @@ namespace soulcloud
         // the topic. Reassemble here so the core always sees one complete
         // message (this also makes CONFIG_SOULCLOUD_INBOUND_MAX enforce
         // the WHOLE payload, not each fragment).
-        struct frag_state
-        {
+        struct frag_state {
             bool active = false;    // mid-stream
             uint32_t total = 0;     // total_data_len of the current message
             uint32_t received = 0;  // bytes buffered so far
@@ -132,4 +134,4 @@ namespace soulcloud
         void handle_event(esp_mqtt_event_handle_t evt);
         void handle_publish(esp_mqtt_event_handle_t evt);
     };
-}  // namespace soulcloud
+} // namespace soulcloud

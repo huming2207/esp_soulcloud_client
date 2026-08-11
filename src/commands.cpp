@@ -19,7 +19,7 @@ esp_err_t soulcloud::command_registry::register_command(const char *name, comman
     }
     for (uint32_t i = 0; i < count; ++i) {
         if (strcmp(entries[i].name, name) == 0) {
-            entries[i].handler = handler;  // replace
+            entries[i].handler = handler; // replace
             entries[i].ctx = ctx;
             return ESP_OK;
         }
@@ -35,27 +35,31 @@ esp_err_t soulcloud::command_registry::register_command(const char *name, comman
     return ESP_OK;
 }
 
-soulcloud::command_registry::recent_entry *soulcloud::command_registry::recent_find(const uint8_t *id)
+soulcloud::command_registry::recent_entry *soulcloud::command_registry::recent_find(const uint8_t *id, uint64_t seq)
 {
     for (uint32_t i = 0; i < RECENT_CACHE; ++i) {
-        if (recent[i].valid && memcmp(recent[i].id, id, 16) == 0) {
+        if (recent[i].valid && recent[i].seq == seq && memcmp(recent[i].id, id, sizeof(recent[i].id)) == 0) {
             return &recent[i];
         }
     }
     return nullptr;
 }
 
-void soulcloud::command_registry::recent_put(const uint8_t *id, int32_t code)
+void soulcloud::command_registry::recent_put(const uint8_t *id, uint64_t seq, const uint8_t *result, size_t result_len)
 {
+    if (result == nullptr || result_len == 0 || result_len > sizeof(recent_entry::result)) {
+        return;
+    }
     recent_entry *e = &recent[recent_head];
     recent_head = (recent_head + 1) % RECENT_CACHE;
-    memcpy(e->id, id, 16);
-    e->code = code;
+    memcpy(e->id, id, sizeof(e->id));
+    e->seq = seq;
+    e->result_len = (uint16_t)result_len;
+    memcpy(e->result, result, result_len);
     e->valid = true;
 }
 
-int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len,
-                                   uint8_t *out_buf, size_t out_cap)
+int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len, uint8_t *out_buf, size_t out_cap)
 {
     command_exec exec;
     const int32_t rc = decode_command_exec(payload, len, &exec);
@@ -70,14 +74,12 @@ int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len
         if (decode_command_id(payload, len, id, &seq) == ERR_OK) {
             command_result result = {};
             result.id = id;
-            result.seq = seq;  // backend matches the result by (id, seq)
+            result.seq = seq; // backend matches the result by (id, seq)
             result.args = nullptr;
             result.arg_count = 0;
             result.code = CMD_RESULT_ERR_DECODE;
             size_t out_len = 0;
-            return encode_command_result(out_buf, out_cap, &out_len, &result) == ERR_OK
-                       ? (int32_t)out_len
-                       : ERR_OVERFLOW;
+            return encode_command_result(out_buf, out_cap, &out_len, &result) == ERR_OK ? (int32_t)out_len : ERR_OVERFLOW;
         }
         ESP_LOGW(TAG, "decode cmd/exec failed: %d", rc);
         return rc;
@@ -90,14 +92,13 @@ int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len
     result.arg_count = 0;
 
     // QoS1 redelivery: answer from cache, never re-execute
-    if (recent_entry *cached = recent_find(exec.id); cached != nullptr) {
-        ESP_LOGD(TAG, "command %.*s redelivered; answering from cache (code %ld)",
-                 (int)exec.cmd_len, exec.cmd, (long)cached->code);
-        result.code = cached->code;
-        size_t out_len = 0;
-        return soulcloud::encode_command_result(out_buf, out_cap, &out_len, &result) == ERR_OK
-                   ? (int32_t)out_len
-                   : ERR_OVERFLOW;
+    if (recent_entry *cached = recent_find(exec.id, exec.seq); cached != nullptr) {
+        ESP_LOGD(TAG, "command %.*s redelivered; answering from cache", (int)exec.cmd_len, exec.cmd);
+        if (cached->result_len > out_cap) {
+            return ERR_OVERFLOW;
+        }
+        memcpy(out_buf, cached->result, cached->result_len);
+        return cached->result_len;
     }
 
     // find the handler
@@ -114,19 +115,24 @@ int32_t soulcloud::command_registry::dispatch(const uint8_t *payload, size_t len
 
     if (handler == nullptr) {
         ESP_LOGW(TAG, "unknown command %.*s", (int)exec.cmd_len, exec.cmd);
-        result.code = -1;  // unknown command
-        recent_put(exec.id, -1);
+        result.code = -1; // unknown command
         size_t out_len = 0;
-        return soulcloud::encode_command_result(out_buf, out_cap, &out_len, &result) == ERR_OK
-                   ? (int32_t)out_len
-                   : ERR_OVERFLOW;
+        const int32_t enc = soulcloud::encode_command_result(out_buf, out_cap, &out_len, &result);
+        if (enc != ERR_OK) {
+            return ERR_OVERFLOW;
+        }
+        recent_put(exec.id, exec.seq, out_buf, out_len);
+        return (int32_t)out_len;
     }
 
     const esp_err_t err = handler(&exec, &result, ctx);
-    result.code = (err == ESP_OK) ? result.code : -2;  // internal error
-    recent_put(exec.id, result.code);
+    result.code = (err == ESP_OK) ? result.code : -2; // internal error
 
     size_t out_len = 0;
     const int32_t enc = encode_command_result(out_buf, out_cap, &out_len, &result);
-    return enc == ERR_OK ? (int32_t)out_len : enc;
+    if (enc != ERR_OK) {
+        return enc;
+    }
+    recent_put(exec.id, exec.seq, out_buf, out_len);
+    return (int32_t)out_len;
 }

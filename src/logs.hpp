@@ -7,8 +7,8 @@
  * payload chunks) under a mutex and publishes it to the `log` topic at
  * QoS 0 (best-effort telemetry; drops are counted and surfaced via the
  * drop WARN), throttled to the configured rate. Packets over the rate
- * limit are dropped silently (on9log core tracks its own overflow
- * separately).
+ * limit remain queued until token credit is available (on9log core tracks
+ * its own overflow separately).
  * With cfg->log_batch_count > 1 packets are accumulated and published as
  * one aggregated container (PROTOCOL.log-packaging.md).
  *
@@ -33,7 +33,7 @@
  * guard), and its own ring-buffer drop is suppressed so it cannot trigger
  * another notification.
  *
- * Memory rules: one static 4 KiB reassembly buffer; the mutex uses static
+ * Memory rules: fixed packet and batch buffers; the mutex uses static
  * storage; the ring buffer is heap-allocated once in init().
  */
 
@@ -108,23 +108,22 @@ namespace soulcloud
         void set_wake(void (*cb)(void *ctx), void *ctx);
 
         /**
-         * @brief Absolute deadline (us) for flushing the current batch.
-         * @return 0 when batching is disabled, the batch is empty, or the
-         *         timeout is 0; otherwise batch_start + timeout.
+         * @brief Next absolute wake deadline for pending rate-limited work.
+         * @return 0 when no queued/batched work needs a timed wake.
          */
-        uint64_t batch_deadline_us() const;
+        uint64_t next_deadline_us() const;
 
     private:
         log_sender() = default;
 
         static constexpr char TAG[] = "soulcloud_log";
-        static constexpr uint32_t PACKET_MAX = 4096;  // max assembled packet
+        static constexpr uint32_t PACKET_MAX = 4096; // max assembled packet
 
         const config *_cfg = nullptr;
         mqtt_bridge *_bridge = nullptr;
         SemaphoreHandle_t _sink_mutex = nullptr;
         StaticSemaphore_t _sink_mutex_storage = {};
-        RingbufHandle_t log_rb = nullptr;  // producer -> consumer queue
+        RingbufHandle_t log_rb = nullptr; // producer -> consumer queue
         // Long-lived sink descriptor handed to on9log (the core keeps the
         // pointer, not a copy).
         on9log_sink_t _sink = {};
@@ -134,38 +133,55 @@ namespace soulcloud
         bool packet_active = false;
         bool overflow = false;
 
-        uint64_t last_sent_us = 0;
+        // Fixed-point token bucket: one token = RATE_TOKEN_SCALE units.
+        // Capacity/refill mirror the backend default and a batch consumes
+        // one token per contained log packet.
+        // Keep 20 of the backend's default 100-token shared uplink burst
+        // available for stat/command/OTA results.
+        static constexpr uint32_t RATE_BURST = 80;
+        static constexpr uint64_t RATE_TOKEN_SCALE = 1000000ull;
+        uint64_t rate_units = 0;
+        uint64_t rate_last_refill_us = 0;
         uint32_t dropped_count = 0;
-        bool drop_notify_inflight = false;  // re-entrancy guard for the drop WARN
-        uint64_t last_drop_notify_us = 0;    // throttle: at most one WARN per second
+        bool drop_notify_inflight = false; // re-entrancy guard for the drop WARN
+        uint64_t last_drop_notify_us = 0;  // throttle: at most one WARN per second
 
         // ---- batching (PROTOCOL.log-packaging.md) ----
-        // Batch buffer layout: [0..3] reserved for the container head
+        // Batch buffer layout: [0..3] is the fixed container head
         // (0x01 + array16); elements (bin8/bin16 header + packet bytes)
-        // accumulate from batch+4. On flush, <=15 elements compact the
-        // head to 0x01 + fixarray (memmove) and 16+ keep array16.
-        static constexpr uint32_t BATCH_MAX_BYTES = 4096;  // container budget
-        // Cap matches the backend's per-element rate bucket (100 burst):
-        // the broker charges one token per ELEMENT, so a larger container
-        // could never be accepted even with a full bucket (ESP-R3).
-        static constexpr uint32_t BATCH_MAX_ELEMS = 100;
+        // accumulate from batch+4. Keeping array16 for every count avoids
+        // moving the accumulated payload during flush.
+        // Element storage includes each MessagePack bin header. Add the
+        // largest bin16 header so one legal PACKET_MAX packet always fits.
+        static constexpr uint32_t BATCH_MAX_BYTES = PACKET_MAX + 3;
+        // Match the device log bucket. The backend bucket is shared by all
+        // uplinks, so consuming its full 100-token capacity with one log
+        // container can starve stat/command/OTA results.
+        static constexpr uint32_t BATCH_MAX_ELEMS = RATE_BURST;
         uint8_t batch[4 + BATCH_MAX_BYTES] = {};
-        size_t batch_len = 0;        // element bytes accumulated
+        size_t batch_len = 0; // element bytes accumulated
         uint32_t batch_elems = 0;
         uint64_t batch_start_us = 0;  // when the batch started (timeout base)
-        void (*wake_cb)(void *ctx) = nullptr;  // core-task notification
+        uint8_t *held_item = nullptr; // received item awaiting batch rate credit
+        size_t held_item_len = 0;
+        void (*wake_cb)(void *ctx) = nullptr; // core-task notification
         void *wake_ctx = nullptr;
 
         bool batch_append(const uint8_t *pkt, size_t len);
-        void flush_batch();
-        bool throttle_ok();
-        bool rate_credit() const;  // limiter has credit right now
+        bool flush_batch();
+        bool batch_flush_due(uint64_t now) const;
+        bool throttle_ok(uint32_t cost);
+        bool rate_credit(uint32_t cost) const;
+        uint64_t rate_deadline_us(uint32_t cost, uint64_t now) const;
+        uint64_t projected_rate_units(uint64_t now) const;
+        void refill_rate(uint64_t now);
+        void record_drop();
 
         static void sink_start(const uint8_t *header, size_t header_len, void *ctx);
-        static void sink_payload(const uint8_t *payload, size_t payload_len,
-                                 size_t total_arg_cnt, size_t curr_arg_index, void *ctx);
+        static void sink_payload(const uint8_t *payload, size_t payload_len, size_t total_arg_cnt, size_t curr_arg_index,
+                                 void *ctx);
         static void sink_end(void *ctx);
 
         void send_packet(const uint8_t *pkt, size_t len);
     };
-}  // namespace soulcloud
+} // namespace soulcloud

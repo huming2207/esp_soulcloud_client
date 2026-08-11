@@ -18,7 +18,6 @@
 #include <esp_log.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
-#include <mbedtls/md.h>
 #include <nvs.h>
 #ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include <esp_crt_bundle.h>
@@ -29,11 +28,14 @@
 
 using namespace soulcloud;
 
-    static int hex_val(char c)
+static int hex_val(char c)
 {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
     return 0;
 }
 
@@ -44,6 +46,33 @@ esp_err_t soulcloud::ota_executor::init(const config *cfg, mqtt_bridge *bridge)
     }
     _cfg = cfg;
     _bridge = bridge;
+    active.store(false, std::memory_order_release);
+    exit_requested.store(false, std::memory_order_release);
+    worker_exited.store(false, std::memory_order_release);
+
+    // mbedtls_md_setup allocates its algorithm context. Do it once here,
+    // never in the OTA hot path, and reuse the context for every attempt.
+    mbedtls_md_init(&sha_ctx);
+    int mrc = mbedtls_md_setup(&sha_ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 0);
+    if (mrc != 0) {
+        mbedtls_md_free(&sha_ctx);
+        _cfg = nullptr;
+        _bridge = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+    sha_ready = true;
+
+    TaskHandle_t created_task = nullptr;
+    if (xTaskCreate(task_trampoline, "soulcloud_ota", TASK_STACK, this, TASK_PRIORITY, &created_task) != pdPASS) {
+        mbedtls_md_free(&sha_ctx);
+        sha_ready = false;
+        _cfg = nullptr;
+        _bridge = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+    // The worker starts idle and remains allocated until deinit(), so OTA
+    // retries do not allocate/free task stacks in steady state.
+    task.store(created_task, std::memory_order_release);
     return ESP_OK;
 }
 
@@ -55,30 +84,34 @@ void soulcloud::ota_executor::deinit()
     // normally ends within ota_timeout_s; the forced delete below is a
     // last resort that leaks the HTTP/OTA handles but is safe against
     // NULL derefs (and deinit is a terminating operation anyway).
-    // Wait for an in-flight OTA task to finish or park (`active` is the
-    // task's exit signal; the task parks instead of self-deleting, so
-    // the handle is always live and vTaskDelete below is always safe —
-    // both for a parked task and for one still running past the budget).
-    if (task.load(std::memory_order_acquire) != nullptr ||
-        active.load(std::memory_order_acquire)) {
-        const uint32_t budget_ms =
-            1000u + (uint32_t)(_cfg != nullptr ? _cfg->ota_timeout_s : 0) * 1000u;
-        uint32_t waited = 0;
-        while (active.load(std::memory_order_acquire) && waited < budget_ms) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            waited += 10;
+    // Ask the persistent worker to leave its wait loop. While an OTA is in
+    // progress, the notification remains pending until run_once() returns.
+    const TaskHandle_t h = task.load(std::memory_order_acquire);
+    if (h != nullptr) {
+        exit_requested.store(true, std::memory_order_release);
+        xTaskNotifyGive(h);
+        const uint32_t budget_ms = 1000u + (uint32_t)(_cfg != nullptr ? _cfg->ota_timeout_s : 0) * 1000u;
+        const TickType_t budget_ticks = pdMS_TO_TICKS(budget_ms);
+        TickType_t waited = 0;
+        while (!worker_exited.load(std::memory_order_acquire) && waited < budget_ticks) {
+            vTaskDelay(1);
+            waited++;
         }
-        if (active.load(std::memory_order_acquire)) {
-            ESP_LOGW(TAG, "OTA task still running after %lu ms; force-deleting",
-                     (unsigned long)budget_ms);
+        if (!worker_exited.load(std::memory_order_acquire)) {
+            ESP_LOGW(TAG, "OTA worker still running after %lu ms; force-deleting", (unsigned long)budget_ms);
         }
-        const TaskHandle_t h = task.load(std::memory_order_acquire);
-        if (h != nullptr) {
-            vTaskDelete(h);  // safe: parked or running, never dead
-        }
+        // The worker parks after publishing worker_exited, keeping the
+        // handle live until this owner deletes it.
+        vTaskDelete(h);
         task.store(nullptr, std::memory_order_release);
     }
     active.store(false, std::memory_order_release);
+    exit_requested.store(false, std::memory_order_release);
+    worker_exited.store(false, std::memory_order_release);
+    if (sha_ready) {
+        mbedtls_md_free(&sha_ctx);
+        sha_ready = false;
+    }
     _cfg = nullptr;
     _bridge = nullptr;
 }
@@ -118,7 +151,7 @@ void soulcloud::ota_executor::finalize_pending_ota()
     size_t len = sizeof(pending_rel);
     if (nvs_get_str(h, NVS_KEY_PENDING_REL, pending_rel, &len) != ESP_OK) {
         nvs_close(h);
-        return;  // nothing pending (also the common case)
+        return; // nothing pending (also the common case)
     }
     // First boot after an OTA: only the freshly flashed image is allowed
     // to promote the pending release. With rollback enabled the bootloader
@@ -134,8 +167,9 @@ void soulcloud::ota_executor::finalize_pending_ota()
     }
 #if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
     if (state != ESP_OTA_IMG_PENDING_VERIFY) {
-        ESP_LOGW(TAG, "booted image is not pending-verify (state %d); "
-                      "dropping pending release %s",
+        ESP_LOGW(TAG,
+                 "booted image is not pending-verify (state %d); "
+                 "dropping pending release %s",
                  (int)state, pending_rel);
         nvs_erase_key(h, NVS_KEY_PENDING_REL);
         nvs_commit(h);
@@ -145,10 +179,10 @@ void soulcloud::ota_executor::finalize_pending_ota()
     if (esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
         ESP_LOGW(TAG, "mark app valid failed; keeping release pending");
         nvs_close(h);
-        return;  // retried on the next connect
+        return; // retried on the next connect
     }
 #else
-    (void)state;  // no rollback mechanism: the pending image is the running one
+    (void)state; // no rollback mechanism: the pending image is the running one
 #endif
     // Promote: ota_rel = pending, erase pending.
     nvs_set_str(h, NVS_KEY_LAST_REL, pending_rel);
@@ -160,7 +194,8 @@ void soulcloud::ota_executor::finalize_pending_ota()
 
 esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
 {
-    if (_cfg == nullptr || _bridge == nullptr || active) {
+    if (_cfg == nullptr || _bridge == nullptr || task.load(std::memory_order_acquire) == nullptr ||
+        active.load(std::memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -169,8 +204,7 @@ esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
     // acknowledged or the target stalls and fails even though the
     // desired firmware is running.
     if (last_ota_matches(notice->release_id)) {
-        ESP_LOGI(TAG, "release %s already applied; acking job %s",
-                 notice->release_id, notice->job_id);
+        ESP_LOGI(TAG, "release %s already applied; acking job %s", notice->release_id, notice->job_id);
         snprintf(pending.release_id, sizeof(pending.release_id), "%s", notice->release_id);
         snprintf(pending.job_id, sizeof(pending.job_id), "%s", notice->job_id);
         report_state("installed", 0, "already applied");
@@ -179,8 +213,7 @@ esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
 
     // sanity: refuse absurd image sizes (partition guard)
     if (notice->bin_size > _cfg->ota_max_bytes) {
-        ESP_LOGE(TAG, "bin_size %u exceeds limit %lu", notice->bin_size,
-                 (unsigned long)_cfg->ota_max_bytes);
+        ESP_LOGE(TAG, "bin_size %u exceeds limit %lu", notice->bin_size, (unsigned long)_cfg->ota_max_bytes);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -191,26 +224,8 @@ esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
     snprintf(pending.download_url, sizeof(pending.download_url), "%s", notice->download_url);
     snprintf(pending.download_token, sizeof(pending.download_token), "%s", notice->download_token);
 
-    // Reap a task left parked by a previous failed OTA (safe: a parked
-    // task is alive; vTaskDelete on it simply removes it).
-    const TaskHandle_t old_task = task.load(std::memory_order_acquire);
-    if (old_task != nullptr) {
-        vTaskDelete(old_task);
-        task.store(nullptr, std::memory_order_release);
-    }
-
     active.store(true, std::memory_order_release);
-    TaskHandle_t created_task = nullptr;
-    const BaseType_t created = xTaskCreate(task_trampoline, "soulcloud_ota",
-                                           TASK_STACK, this, TASK_PRIORITY, &created_task);
-    if (created != pdPASS) {
-        active.store(false, std::memory_order_release);
-        return ESP_ERR_NO_MEM;
-    }
-    // Publish the handle. The task never self-deletes (it parks), so the
-    // handle stays valid until deinit()/start() reap it — no stale-handle
-    // window even for a fast failure.
-    task.store(created_task, std::memory_order_release);
+    xTaskNotifyGive(task.load(std::memory_order_acquire));
     return ESP_OK;
 }
 
@@ -231,7 +246,7 @@ void soulcloud::ota_executor::report_state(const char *state, int32_t code, cons
         .job_id = pending.job_id,
         .state = state,
         .code = code,
-        .message = message,  // NULL -> omitted (backend rejects null)
+        .message = message, // NULL -> omitted (backend rejects null)
     };
     if (encode_ota_result(buf, sizeof(buf), &len, &result) != ERR_OK) {
         ESP_LOGE(TAG, "encode ota/result failed");
@@ -249,9 +264,8 @@ void soulcloud::ota_executor::report_state(const char *state, int32_t code, cons
  * On success the caller owns *ota_handle and *partition (still open for
  * esp_ota_end); on failure all resources are released and *fail is set.
  */
-bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_out,
-                                       const esp_partition_t **partition_out,
-                                       size_t *total_out, ota_fail *fail)
+bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_out, const esp_partition_t **partition_out,
+                                                  size_t *total_out, ota_fail *fail)
 {
     char url[512] = {};
     snprintf(url, sizeof(url), "%s%s", _cfg->api_base_url, pending.download_url);
@@ -264,7 +278,7 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     http_cfg.user_agent = "soulcloud-esp32";
     http_cfg.disable_auto_redirect = true;
 #ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-    http_cfg.crt_bundle_attach = esp_crt_bundle_attach;  // https:// download
+    http_cfg.crt_bundle_attach = esp_crt_bundle_attach; // https:// download
 #endif
 
     esp_http_client_handle_t http = esp_http_client_init(&http_cfg);
@@ -307,17 +321,12 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
         return false;
     }
 
-    mbedtls_md_context_t sha;
-    mbedtls_md_init(&sha);
-    int mrc = mbedtls_md_setup(&sha, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 0);
-    if (mrc == 0) {
-        mrc = mbedtls_md_starts(&sha);
-    }
+    // sha_ctx was allocated once in init(); starts() only resets it.
+    const int mrc = sha_ready ? mbedtls_md_starts(&sha_ctx) : -1;
     if (mrc != 0) {
         ESP_LOGE(TAG, "sha256 setup failed: -0x%x", -mrc);
         esp_ota_abort(ota_handle);
         esp_http_client_cleanup(http);
-        mbedtls_md_free(&sha);
         *fail = {-5, "sha256 init failed"};
         return false;
     }
@@ -325,6 +334,7 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     uint8_t chunk[CHUNK];
     size_t total = 0;
     bool stream_ok = true;
+    uint32_t chunks_since_delay = 0;
     for (;;) {
         const int n = esp_http_client_read(http, (char *)chunk, sizeof(chunk));
         if (n < 0) {
@@ -350,13 +360,21 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
             stream_ok = false;
             break;
         }
-        mbedtls_md_update(&sha, chunk, (size_t)n);
+        if (mbedtls_md_update(&sha_ctx, chunk, (size_t)n) != 0) {
+            ESP_LOGE(TAG, "sha256 update failed");
+            stream_ok = false;
+            break;
+        }
+        if (++chunks_since_delay == 16) {
+            // Fast local transports must still allow idle to feed TWDT.
+            vTaskDelay(1);
+            chunks_since_delay = 0;
+        }
     }
 
     if (!stream_ok) {
         esp_ota_abort(ota_handle);
         esp_http_client_cleanup(http);
-        mbedtls_md_free(&sha);
         *fail = {-1, "download failed"};
         return false;
     }
@@ -365,18 +383,20 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     // server metadata or the transfer was wrong (SHA-256 below still
     // protects integrity, but the size check keeps telemetry honest)
     if (total != pending.bin_size) {
-        ESP_LOGE(TAG, "size mismatch: got %zu bytes, notice declared %u",
-                 total, pending.bin_size);
+        ESP_LOGE(TAG, "size mismatch: got %zu bytes, notice declared %u", total, pending.bin_size);
         esp_ota_abort(ota_handle);
         esp_http_client_cleanup(http);
-        mbedtls_md_free(&sha);
         *fail = {-5, "size mismatch"};
         return false;
     }
 
     uint8_t digest[32] = {};
-    mbedtls_md_finish(&sha, digest);
-    mbedtls_md_free(&sha);
+    if (mbedtls_md_finish(&sha_ctx, digest) != 0) {
+        esp_ota_abort(ota_handle);
+        esp_http_client_cleanup(http);
+        *fail = {-5, "sha256 finish failed"};
+        return false;
+    }
     esp_http_client_cleanup(http);
 
     bool match = true;
@@ -388,8 +408,7 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
         }
     }
     if (!match) {
-        ESP_LOGE(TAG, "sha256 mismatch (got %02x%02x..., expected %.16s...)",
-                 digest[0], digest[1], pending.bin_sha256);
+        ESP_LOGE(TAG, "sha256 mismatch (got %02x%02x..., expected %.16s...)", digest[0], digest[1], pending.bin_sha256);
         esp_ota_abort(ota_handle);
         *fail = {-2, "checksum mismatch"};
         return false;
@@ -401,24 +420,28 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     return true;
 }
 
-/**
- * Blocks forever after an OTA failure. The task never self-deletes, so
- * the handle published by start() stays valid for the whole lifetime:
- * deinit() (and the next start()) reap it with vTaskDelete, which is
- * safe for a blocked task. This closes the delete-liveness TOCTOU that
- * a self-deleting task had (the handle could die between deinit's
- * active-check and its vTaskDelete).
- */
-void soulcloud::ota_executor::park_and_wait_for_reap()
-{
-    uint32_t dummy = 0;
-    xTaskNotifyWait(0, 0, &dummy, portMAX_DELAY);
-}
-
 void soulcloud::ota_executor::run()
 {
-    ESP_LOGI(TAG, "OTA start: release %s, %u bytes",
-             pending.release_id, pending.bin_size);
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (exit_requested.load(std::memory_order_acquire)) {
+            break;
+        }
+        run_once();
+        active.store(false, std::memory_order_release);
+    }
+
+    // Publish completion but keep the task handle live. deinit() owns and
+    // deletes this init-created worker, avoiding a stale-handle race. Do
+    // not park on a notification: a concurrent start() notification could
+    // otherwise let the task return and invalidate the stored handle.
+    worker_exited.store(true, std::memory_order_release);
+    vTaskSuspend(nullptr);
+}
+
+void soulcloud::ota_executor::run_once()
+{
+    ESP_LOGI(TAG, "OTA start: release %s, %u bytes", pending.release_id, pending.bin_size);
 
     esp_ota_handle_t ota_handle = 0;
     const esp_partition_t *partition = nullptr;
@@ -428,8 +451,6 @@ void soulcloud::ota_executor::run()
     if (!download_and_verify(&ota_handle, &partition, &total, &fail)) {
         ESP_LOGE(TAG, "OTA failed: %s", fail.msg);
         report_state("failed", fail.code, fail.msg);
-        active.store(false, std::memory_order_release);
-        park_and_wait_for_reap();  // never self-delete: the handle must stay live
         return;
     }
     ESP_LOGI(TAG, "sha256 verified (%zu bytes)", total);
@@ -439,8 +460,6 @@ void soulcloud::ota_executor::run()
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
         report_state("failed", err == ESP_ERR_OTA_VALIDATE_FAILED ? -4 : -3, "image invalid");
-        active.store(false, std::memory_order_release);
-        park_and_wait_for_reap();
         return;
     }
 
@@ -448,8 +467,6 @@ void soulcloud::ota_executor::run()
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
         report_state("failed", -3, "boot switch failed");
-        active.store(false, std::memory_order_release);
-        park_and_wait_for_reap();
         return;
     }
 

@@ -6,14 +6,14 @@
  * Lifecycle: config_store::instance().load() -> soulcloud_client::init()
  *            -> start() -> (running) -> stop() -> deinit().
  *
- * Memory rules: all storage is static/stack except the PIMPL itself and
- * the ring buffers (allocated in init(), freed in deinit()); inbound
- * MQTT messages additionally allocate a short-lived staging buffer per
- * message in on_mqtt_data().
+ * Memory rules: component-owned heap storage is allocated in init() and
+ * released in deinit(). Inbound MQTT messages are written directly into
+ * the preallocated ring buffer; there is no per-message staging allocation.
  */
 
 #include <esp_err.h>
 #include <esp_system.h>
+#include <atomic>
 #include <cstdint>
 
 #include <soulcloud_types.hpp>
@@ -33,10 +33,9 @@ namespace soulcloud
      * introduces padding; the struct is never serialized raw, so this is
      * only a size note, not a correctness issue.
      */
-    struct config
-    {
+    struct config {
         uint32_t stat_interval_s;           /**< stat report period, seconds. */
-        uint32_t log_rate_per_s;            /**< log uplink throttle, messages/second. */
+        uint32_t log_rate_per_s;            /**< log uplink throttle, packets/second. */
         uint32_t log_queue_len;             /**< Reserved (log TX queue depth). */
         uint32_t mqtt_buffer_in;            /**< esp-mqtt receive buffer, bytes. */
         uint32_t mqtt_buffer_out;           /**< esp-mqtt transmit buffer, bytes. */
@@ -154,12 +153,12 @@ namespace soulcloud
     /**
      * @brief Command handler for a registered command name.
      *
-     * Called on the MQTT event loop with the decoded execution; must fill
+     * Called on the dedicated soulcloud core task with the decoded execution; must fill
      * *out (code and, optionally, an args payload — id/seq are filled by
      * the dispatcher before the call).
      *
-     * @note Must be quick and non-blocking: it runs on the MQTT event
-     *       task and blocks the whole MQTT stack while executing.
+     * @note Keep handlers bounded. They do not block the MQTT event task,
+     *       but they share the core task with inbound dispatch and uplink.
      *
      * @param[in]  cmd Decoded `cmd/exec` (payload views valid for the call).
      * @param[out] out Result to encode; args may reference cmd or storage
@@ -190,9 +189,7 @@ namespace soulcloud
      * state is internal (PIMPL). The periodic stat report runs on the
      * dedicated core task (never on the shared esp_timer task, since
      * publish can block on the network). Long-lived heap
-     * allocations happen in init()/deinit() (PIMPL, ring buffers);
-     * inbound MQTT messages also allocate a per-message staging buffer
-     * in on_mqtt_data().
+     * allocations happen in init()/deinit() (PIMPL, ring buffers and tasks).
      */
     class soulcloud_client
     {
@@ -214,7 +211,7 @@ namespace soulcloud
          * @brief Initialise the client core.
          *
          * Copies *cfg (the caller may reuse the storage), creates the
-         * MQTT bridge, the periodic stat timer, the on9log MQTT sink and
+         * MQTT bridge, the event-driven core task, the on9log MQTT sink and
          * the OTA executor. Idempotent until deinit().
          *
          * @param[in] cfg Configuration (copied).
@@ -229,7 +226,7 @@ namespace soulcloud
 
         /**
          * @brief Start the client: connects to the broker (auto-reconnect
-         *        enabled) and starts the periodic stat timer.
+         *        enabled) and enables periodic stat scheduling.
          *
          * @return ESP_OK, or ESP_ERR_INVALID_STATE if not initialised.
          */
@@ -251,7 +248,10 @@ namespace soulcloud
          * @brief Whether the MQTT session is currently established.
          * @return true when connected.
          */
-        bool is_connected() const { return connected; }
+        bool is_connected() const
+        {
+            return connected.load(std::memory_order_acquire);
+        }
 
         /**
          * @brief True once both downlink subscriptions (cmd/exec, ota)
@@ -262,7 +262,7 @@ namespace soulcloud
          * must not miss downlink traffic should gate on this instead of
          * is_connected().
          */
-        bool downlink_ready() const;  // defined in soulcloud.cpp (impl is pimpl)
+        bool downlink_ready() const; // defined in soulcloud.cpp (impl is pimpl)
 
         /**
          * @brief Set the connection state callback.
@@ -312,15 +312,15 @@ namespace soulcloud
         soulcloud_client() = default;
 
         static constexpr char TAG[] = "soulcloud";
-        static constexpr uint32_t FW_SHA256_LEN = 32;  // raw SHA-256 bytes
+        static constexpr uint32_t FW_SHA256_LEN = 32; // raw SHA-256 bytes
 
-        class client_impl;  // PIMPL: mqtt_bridge + esp_timer (see soulcloud.cpp)
+        class client_impl; // PIMPL: MQTT bridge + core task (see soulcloud.cpp)
         client_impl *impl = nullptr;
 
         config _cfg = {};
         bool inited = false;
-        bool started = false;
-        bool connected = false;
+        std::atomic<bool> started{false};
+        std::atomic<bool> connected{false};
         connection_cb_t conn_cb = nullptr;
         void *conn_ctx = nullptr;
 
@@ -330,8 +330,7 @@ namespace soulcloud
          *  into the core task's inbound ring buffer (it is drained by the
          *  dedicated core task; handlers never run on the esp-mqtt task
          *  stack). */
-        void on_mqtt_data(const char *topic, size_t topic_len,
-                          const uint8_t *data, size_t data_len);
+        void on_mqtt_data(const char *topic, size_t topic_len, const uint8_t *data, size_t data_len);
         /** SUBACK / SUBSCRIBE_FAILED for one of the tracked subscribes. */
         void on_subscribed(int msg_id, int return_code, bool failed);
         /** Core task: dispatches a copied cmd/exec payload. */
@@ -345,4 +344,4 @@ namespace soulcloud
         static void hex_to_bin(const char *hex, uint8_t *bin, size_t len);
         static bool topic_matches(const char *topic, size_t topic_len, const char *expected);
     };
-}  // namespace soulcloud
+} // namespace soulcloud

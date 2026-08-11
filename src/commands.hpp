@@ -21,8 +21,8 @@ namespace soulcloud
      * Maps command names to handlers and dispatches decoded `cmd/exec`
      * payloads. A ring cache of the last RECENT_CACHE command ids
      * suppresses re-execution of QoS1 redeliveries: a cached id is
-     * answered with the stored result code instead of running the
-     * handler again.
+     * answered with the exact stored encoded result instead of running
+     * the handler again.
      *
      * @note dispatch() runs on the dedicated soulcloud core task (not
      *       the MQTT event task); handlers must still be quick and
@@ -87,26 +87,25 @@ namespace soulcloud
          * @return The encoded result length (> 0), or a negative
          *         protocol_err / ESP error.
          */
-        int32_t dispatch(const uint8_t *payload, size_t len,
-                         uint8_t *out_buf, size_t out_cap);
+        int32_t dispatch(const uint8_t *payload, size_t len, uint8_t *out_buf, size_t out_cap);
 
     private:
         command_registry() = default;
 
         static constexpr char TAG[] = "soulcloud_cmd";
 
-        struct command_entry
-        {
+        struct command_entry {
             const char *name;
             command_handler_t handler;
-            void *ctx;  // opaque user context, passed to the handler
+            void *ctx; // opaque user context, passed to the handler
         };
 
-        struct recent_entry
-        {
-            uint8_t id[16];  // command UUID
-            int32_t code;    // result code sent for this id
+        struct recent_entry {
+            uint8_t id[16]; // command UUID
+            uint64_t seq;
+            uint16_t result_len;
             bool valid;
+            uint8_t result[1024];
         };
 
         static constexpr uint32_t MAX_COMMANDS = 16;
@@ -117,7 +116,7 @@ namespace soulcloud
         recent_entry recent[RECENT_CACHE];
         uint32_t recent_head = 0;
 
-        recent_entry *recent_find(const uint8_t *id);
-        void recent_put(const uint8_t *id, int32_t code);
+        recent_entry *recent_find(const uint8_t *id, uint64_t seq);
+        void recent_put(const uint8_t *id, uint64_t seq, const uint8_t *result, size_t result_len);
     };
-}  // namespace soulcloud
+} // namespace soulcloud

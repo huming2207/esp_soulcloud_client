@@ -39,7 +39,7 @@ esp_err_t soulcloud::mqtt_bridge::init(const config *cfg, const mqtt_callbacks *
     mqtt_cfg.buffer.size = (int)cfg->mqtt_buffer_in;
     mqtt_cfg.buffer.out_size = (int)cfg->mqtt_buffer_out;
     mqtt_cfg.network.reconnect_timeout_ms = (int)cfg->mqtt_reconnect_timeout_ms;
-    mqtt_cfg.network.disable_auto_reconnect = false;  // auto-reconnect on
+    mqtt_cfg.network.disable_auto_reconnect = false; // auto-reconnect on
 #ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
     // wss:// endpoints verify the server against the built-in CA bundle;
     // without this, secure URIs fail TLS setup in ESP-IDF 6.x (no
@@ -62,11 +62,9 @@ esp_err_t soulcloud::mqtt_bridge::init(const config *cfg, const mqtt_callbacks *
 
     // reassembly buffer for fragmented inbound PUBLISHes (one complete
     // message at a time; events are delivered strictly serially)
-    frag.buf = (uint8_t *)heap_caps_malloc(CONFIG_SOULCLOUD_INBOUND_MAX,
-                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    frag.buf = (uint8_t *)heap_caps_malloc(CONFIG_SOULCLOUD_INBOUND_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (frag.buf == nullptr) {
-        frag.buf = (uint8_t *)heap_caps_malloc(CONFIG_SOULCLOUD_INBOUND_MAX,
-                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        frag.buf = (uint8_t *)heap_caps_malloc(CONFIG_SOULCLOUD_INBOUND_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
     if (frag.buf == nullptr) {
         esp_mqtt_client_destroy(client);
@@ -81,13 +79,13 @@ void soulcloud::mqtt_bridge::deinit()
     if (client == nullptr) {
         return;
     }
-    if (started) {
+    if (started.load(std::memory_order_acquire)) {
         esp_mqtt_client_stop(client);
-        started = false;
+        started.store(false, std::memory_order_release);
     }
     esp_mqtt_client_destroy(client);
     client = nullptr;
-    connected = false;
+    connected.store(false, std::memory_order_release);
     if (frag.buf != nullptr) {
         heap_caps_free(frag.buf);
         frag.buf = nullptr;
@@ -97,25 +95,25 @@ void soulcloud::mqtt_bridge::deinit()
 
 esp_err_t soulcloud::mqtt_bridge::start()
 {
-    if (client == nullptr || started) {
-        return started ? ESP_OK : ESP_ERR_INVALID_STATE;
+    if (client == nullptr || started.load(std::memory_order_acquire)) {
+        return started.load(std::memory_order_relaxed) ? ESP_OK : ESP_ERR_INVALID_STATE;
     }
     const esp_err_t err = esp_mqtt_client_start(client);
     if (err == ESP_OK) {
-        started = true;
+        started.store(true, std::memory_order_release);
     }
     return err;
 }
 
 esp_err_t soulcloud::mqtt_bridge::stop()
 {
-    if (client == nullptr || !started) {
+    if (client == nullptr || !started.load(std::memory_order_acquire)) {
         return ESP_OK;
     }
     esp_mqtt_client_disconnect(client);
     esp_mqtt_client_stop(client);
-    started = false;
-    connected = false;
+    started.store(false, std::memory_order_release);
+    connected.store(false, std::memory_order_release);
     return ESP_OK;
 }
 
@@ -137,7 +135,7 @@ int32_t soulcloud::mqtt_bridge::publish(const char *topic, const uint8_t *data, 
 
 void soulcloud::mqtt_bridge::notify_wifi_connected()
 {
-    if (client == nullptr || !started || connected) {
+    if (client == nullptr || !started.load(std::memory_order_acquire) || connected.load(std::memory_order_acquire)) {
         return;
     }
     // esp-mqtt reconnects on its own timer; nudge it immediately.
@@ -156,15 +154,15 @@ void soulcloud::mqtt_bridge::handle_event(esp_mqtt_event_handle_t evt)
 {
     switch (evt->event_id) {
     case MQTT_EVENT_CONNECTED:
-        connected = true;
+        connected.store(true, std::memory_order_release);
         if (_cbs.on_connected != nullptr) {
             _cbs.on_connected(_cbs.ctx);
         }
         break;
     case MQTT_EVENT_DISCONNECTED:
-        connected = false;
-        frag.active = false;  // stale fragments are worthless; QoS1 outbox
-                              // redelivers the whole message after reconnect
+        connected.store(false, std::memory_order_release);
+        frag.active = false; // stale fragments are worthless; QoS1 outbox
+                             // redelivers the whole message after reconnect
         if (_cbs.on_disconnected != nullptr) {
             _cbs.on_disconnected(_cbs.ctx);
         }
@@ -189,8 +187,7 @@ void soulcloud::mqtt_bridge::handle_event(esp_mqtt_event_handle_t evt)
         // v1.1.0 (SUBACK rejection arrives via MQTT_EVENT_SUBSCRIBED with
         // rc >= 0x80); this branch is defensive only, and evt->msg_id is
         // meaningless for ERROR events in that case.
-        if (evt->error_handle != nullptr &&
-            evt->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
+        if (evt->error_handle != nullptr && evt->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
             if (_cbs.on_subscribed != nullptr) {
                 _cbs.on_subscribed(_cbs.ctx, evt->msg_id, -1, true);
             }
@@ -227,11 +224,20 @@ void soulcloud::mqtt_bridge::handle_publish(esp_mqtt_event_handle_t evt)
         // empty payload: forward as-is (matches pre-reassembly behaviour;
         // the core's strict decoder rejects it with an error result)
         if (_cbs.on_data != nullptr) {
-            _cbs.on_data(_cbs.ctx,
-                         evt->topic != nullptr ? evt->topic : "",
-                         evt->topic != nullptr ? (size_t)evt->topic_len : 0u,
-                         (const uint8_t *)evt->data,
-                         (size_t)evt->data_len);
+            _cbs.on_data(_cbs.ctx, evt->topic != nullptr ? evt->topic : "", evt->topic != nullptr ? (size_t)evt->topic_len : 0u,
+                         (const uint8_t *)evt->data, (size_t)evt->data_len);
+        }
+        return;
+    }
+
+    // The common case is one complete MQTT event. Forward its borrowed
+    // buffer directly; the core copies it once into its task-handoff ring
+    // buffer. Reassembly storage is only needed for true fragmentation.
+    if (offset == 0 && total == data_len && !frag.active) {
+        frag.active = false;
+        if (_cbs.on_data != nullptr) {
+            _cbs.on_data(_cbs.ctx, evt->topic != nullptr ? evt->topic : "", evt->topic != nullptr ? (size_t)evt->topic_len : 0u,
+                         (const uint8_t *)evt->data, data_len);
         }
         return;
     }
@@ -252,8 +258,7 @@ void soulcloud::mqtt_bridge::handle_publish(esp_mqtt_event_handle_t evt)
         // first fragment carries the topic
         frag.topic_len = 0;
         if (evt->topic != nullptr) {
-            const size_t n = evt->topic_len < sizeof(frag.topic) ? evt->topic_len
-                                                                 : sizeof(frag.topic) - 1;
+            const size_t n = evt->topic_len < sizeof(frag.topic) ? evt->topic_len : sizeof(frag.topic) - 1;
             memcpy(frag.topic, evt->topic, n);
             frag.topic[n] = '\0';
             frag.topic_len = n;
@@ -268,8 +273,7 @@ void soulcloud::mqtt_bridge::handle_publish(esp_mqtt_event_handle_t evt)
     } else {
         // unexpected fragment (offset mismatch or no active message)
         frag.active = false;
-        ESP_LOGW(TAG, "unexpected fragment offset %u (have %u); dropping",
-                 offset, frag.received);
+        ESP_LOGW(TAG, "unexpected fragment offset %u (have %u); dropping", offset, frag.received);
         return;
     }
 
@@ -286,11 +290,7 @@ void soulcloud::mqtt_bridge::handle_publish(esp_mqtt_event_handle_t evt)
         // complete message (single-fragment messages take this path too)
         frag.active = false;
         if (_cbs.on_data != nullptr) {
-            _cbs.on_data(_cbs.ctx,
-                         frag.topic_len > 0 ? frag.topic : "",
-                         frag.topic_len,
-                         frag.buf,
-                         frag.received);
+            _cbs.on_data(_cbs.ctx, frag.topic_len > 0 ? frag.topic : "", frag.topic_len, frag.buf, frag.received);
         }
     }
 }

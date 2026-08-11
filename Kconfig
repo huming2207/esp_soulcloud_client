@@ -40,12 +40,15 @@ menu "Soulcloud client"
         range 10 86400
 
     config SOULCLOUD_LOG_RATE_PER_S
-        int "Log uplink rate limit (messages per second)"
+        int "Log uplink rate limit (packets per second)"
         default 10
         range 1 20
         help
-            Server-side uplink guard allows 20/s with burst 100; the device
-            throttles below that and emits DROPPED packets on overflow.
+            Server-side uplink guard allows 20 packet tokens/s with burst
+            100. A raw publish costs one token; an aggregated container costs
+            one token per element. The device mirrors that accounting with an
+            80-token log burst, reserving server capacity for stat/command/OTA
+            results, and emits DROPPED packets on queue/publish failure.
 
     config SOULCLOUD_LOG_QUEUE_LEN
         int "Log TX queue length (packets)"

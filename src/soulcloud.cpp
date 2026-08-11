@@ -30,31 +30,51 @@ using namespace soulcloud;
 const char *soulcloud::soulcloud_client::reset_reason_str(esp_reset_reason_t r)
 {
     switch (r) {
-    case ESP_RST_UNKNOWN: return "UNKNOWN";
-    case ESP_RST_POWERON: return "POWERON";
-    case ESP_RST_EXT: return "EXT";
-    case ESP_RST_SW: return "SW";
-    case ESP_RST_PANIC: return "PANIC";
-    case ESP_RST_INT_WDT: return "INT_WDT";
-    case ESP_RST_TASK_WDT: return "TASK_WDT";
-    case ESP_RST_WDT: return "WDT";
-    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
-    case ESP_RST_BROWNOUT: return "BROWNOUT";
-    case ESP_RST_SDIO: return "SDIO";
-    case ESP_RST_USB: return "USB";
-    case ESP_RST_JTAG: return "JTAG";
-    case ESP_RST_EFUSE: return "EFUSE";
-    case ESP_RST_PWR_GLITCH: return "PWR_GLITCH";
-    case ESP_RST_CPU_LOCKUP: return "CPU_LOCKUP";
-    default: return "UNKNOWN";
+    case ESP_RST_UNKNOWN:
+        return "UNKNOWN";
+    case ESP_RST_POWERON:
+        return "POWERON";
+    case ESP_RST_EXT:
+        return "EXT";
+    case ESP_RST_SW:
+        return "SW";
+    case ESP_RST_PANIC:
+        return "PANIC";
+    case ESP_RST_INT_WDT:
+        return "INT_WDT";
+    case ESP_RST_TASK_WDT:
+        return "TASK_WDT";
+    case ESP_RST_WDT:
+        return "WDT";
+    case ESP_RST_DEEPSLEEP:
+        return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:
+        return "BROWNOUT";
+    case ESP_RST_SDIO:
+        return "SDIO";
+    case ESP_RST_USB:
+        return "USB";
+    case ESP_RST_JTAG:
+        return "JTAG";
+    case ESP_RST_EFUSE:
+        return "EFUSE";
+    case ESP_RST_PWR_GLITCH:
+        return "PWR_GLITCH";
+    case ESP_RST_CPU_LOCKUP:
+        return "CPU_LOCKUP";
+    default:
+        return "UNKNOWN";
     }
 }
 
 int soulcloud::soulcloud_client::hex_val(char c)
 {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
     return 0;
 }
 
@@ -86,6 +106,8 @@ public:
     // no esp_timer: publish can block for a network timeout and must not
     // run on the shared esp_timer task
     uint64_t next_stat_us = 0;
+    std::atomic<bool> reset_stat_deadline{false};
+    std::atomic<bool> connected_work_pending{false};
 
     // Dedicated inbound dispatch task: command handlers and OTA notice
     // handling are application-ish code with unpredictable stack needs;
@@ -93,39 +115,40 @@ public:
     // task stacks. The MQTT event callback only assembles a small item
     // (header + payload copy) into a FreeRTOS ring buffer and never runs
     // handlers itself; the core task drains the buffer.
-    volatile TaskHandle_t task = nullptr;
+    // Created in init and owned/deleted by destroy(). The task parks after
+    // publishing task_exited, so producers never observe a stale handle.
+    TaskHandle_t task = nullptr;
     RingbufHandle_t inbound_rb = nullptr;
-    volatile bool exit = false;
+    std::atomic<bool> exit_requested{false};
+    std::atomic<bool> task_exited{false};
 
     // Downlink subscription tracking. Concurrency: the mqtt event task
     // only writes done/retry (on_subscribed); the core task owns
     // msg_id/sent_us and every subscribe() call (single-writer per
     // field, atomics for the cross-task ones). downlink_ready is a
     // one-way latch written by the mqtt task, read by applications.
-    struct sub_slot
-    {
-        std::atomic<int> msg_id{-1};   // esp-mqtt message id, -1 = none
-        bool ota = false;              // true = ota topic, false = cmd/exec
-        std::atomic<bool> done{false}; // SUBACK received and accepted
-        std::atomic<bool> retry{false};// rejected/failed: re-issue needed
+    struct sub_slot {
+        std::atomic<int> msg_id{-1};    // esp-mqtt message id, -1 = none
+        bool ota = false;               // true = ota topic, false = cmd/exec
+        std::atomic<bool> done{false};  // SUBACK received and accepted
+        std::atomic<bool> retry{false}; // rejected/failed: re-issue needed
         std::atomic<uint64_t> sent_us{0};
     };
     sub_slot subs[2] = {};
     std::atomic<bool> downlink_ready{false};
-    std::atomic<uint32_t> sub_gen{0};  // bumped on connect/disconnect
+    std::atomic<uint32_t> sub_gen{0}; // bumped on connect/disconnect
 
     enum inbound_kind : uint8_t {
         INBOUND_NONE = 0,
-        INBOUND_CMD,  // cmd/exec payload
-        INBOUND_OTA,  // ota notice payload
+        INBOUND_CMD, // cmd/exec payload
+        INBOUND_OTA, // ota notice payload
     };
 
     /** Ring buffer item header (4 bytes, aligned). */
-    struct inbound_header
-    {
-        uint8_t kind;   // inbound_kind
-        uint8_t pad;    // keep len 16-bit aligned
-        uint16_t len;   // payload length
+    struct inbound_header {
+        uint8_t kind; // inbound_kind
+        uint8_t pad;  // keep len 16-bit aligned
+        uint16_t len; // payload length
     };
 
     // C-callback trampolines
@@ -144,8 +167,7 @@ public:
         static_cast<client_impl *>(ctx)->owner.on_subscribed(msg_id, return_code, failed);
     }
 
-    static void mqtt_on_data(void *ctx, const char *topic, size_t topic_len,
-                             const uint8_t *data, size_t data_len)
+    static void mqtt_on_data(void *ctx, const char *topic, size_t topic_len, const uint8_t *data, size_t data_len)
     {
         static_cast<client_impl *>(ctx)->owner.on_mqtt_data(topic, topic_len, data, data_len);
     }
@@ -160,10 +182,9 @@ public:
      *
      * Task-context only (the SMP kernel takes a kernel spinlock inside
      * xTaskGenericNotify; an ISR would need the FromISR variant). Must
-     * never be called after run() self-deletes: `task` is volatile and
-     * cleared right before vTaskDelete, so a racing producer simply
-     * skips the wake (the consumer is gone). Notifications coalesce,
-     * which is fine because every wake drains both queues completely.
+     * The handle remains live until destroy() has stopped all producers.
+     * Notifications coalesce, which is fine because every wake drains the
+     * queues.
      */
     void wake_core()
     {
@@ -195,7 +216,7 @@ public:
         const uint64_t now = (uint64_t)esp_timer_get_time();
 
         // periodic stat: report on the core task (never on esp_timer)
-        if (owner.started) {
+        if (owner.started.load(std::memory_order_acquire)) {
             if (now >= next_stat_us) {
                 return 0;
             }
@@ -233,7 +254,7 @@ public:
         // instead of 0: flush_batch may be held by the rate limiter, and
         // spinning at 0 would busy-loop the core task for the whole
         // throttle window.
-        const uint64_t batch_due = soulcloud::log_sender::instance().batch_deadline_us();
+        const uint64_t batch_due = soulcloud::log_sender::instance().next_deadline_us();
         if (batch_due != 0 && bridge.is_connected()) {
             if (now >= batch_due) {
                 return 1;
@@ -247,6 +268,18 @@ public:
         return wait_ticks;
     }
 
+    void process_connected_work()
+    {
+        if (!bridge.is_connected() || !connected_work_pending.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        // Keep blocking publish/NVS work off the esp-mqtt event task.
+        owner.report_stat();
+        soulcloud::ota_executor::instance().finalize_pending_ota();
+        next_stat_us = (uint64_t)esp_timer_get_time() + (uint64_t)owner._cfg.stat_interval_s * 1000000ull;
+    }
+
     void run()
     {
         for (;;) {
@@ -258,19 +291,27 @@ public:
             const uint32_t wait_ticks = deadline_wait_ticks();
             uint32_t notified = 0;
             xTaskNotifyWait(0, ULONG_MAX, &notified, wait_ticks);
-            (void)notified;  // spurious wakes are harmless: drains are cheap
+            (void)notified; // spurious wakes are harmless: drains are cheap
+            if (exit_requested.load(std::memory_order_acquire)) {
+                break;
+            }
+            if (reset_stat_deadline.exchange(false, std::memory_order_acq_rel)) {
+                next_stat_us = 0;
+            }
 
             // drain inbound (commands/OTA) without blocking
             size_t len = 0;
             uint8_t *item = (uint8_t *)xRingbufferReceive(inbound_rb, &len, 0);
+            uint32_t inbound_since_delay = 0;
             while (item != nullptr) {
                 if (len >= sizeof(inbound_header)) {
-                    inbound_header hdr = {};
-                    memcpy(&hdr, item, sizeof(hdr));  // unaligned-safe read
-                    const uint8_t *payload = item + sizeof(hdr);
-                    const size_t plen = hdr.len;
-                    if (plen <= len - sizeof(hdr)) {  // truncated-item guard
-                        switch (hdr.kind) {
+                    // NOSPLIT items are 32-bit aligned and inbound_header is
+                    // four bytes, so read the ring-buffer header in place.
+                    const inbound_header *hdr = reinterpret_cast<const inbound_header *>(item);
+                    const uint8_t *payload = item + sizeof(*hdr);
+                    const size_t plen = hdr->len;
+                    if (plen <= len - sizeof(*hdr)) { // truncated-item guard
+                        switch (hdr->kind) {
                         case INBOUND_CMD:
                             owner.dispatch_command(payload, plen);
                             break;
@@ -278,17 +319,20 @@ public:
                             owner.handle_ota_notice(payload, plen);
                             break;
                         default:
-                            ESP_LOGW(TAG, "unknown inbound kind %u", (unsigned)hdr.kind);
+                            ESP_LOGW(TAG, "unknown inbound kind %u", (unsigned)hdr->kind);
                             break;
                         }
                     }
                 }
                 vRingbufferReturnItem(inbound_rb, item);
+                if (++inbound_since_delay == 8) {
+                    // A sustained command burst must still let the idle task
+                    // run and feed the task watchdog.
+                    vTaskDelay(1);
+                    inbound_since_delay = 0;
+                }
                 item = (uint8_t *)xRingbufferReceive(inbound_rb, &len, 0);
             }
-
-            // drain queued log packets (throttled publish, never blocks)
-            soulcloud::log_sender::instance().drain();
 
             // SUBACK watchdog: the only writer of msg_id/sent_us and the
             // only caller of subscribe() (single-writer discipline).
@@ -304,10 +348,8 @@ public:
                     for (auto &sub : subs) {
                         const int mid = sub.msg_id.load(std::memory_order_relaxed);
                         const bool want = !sub.done.load(std::memory_order_relaxed) &&
-                                          (sub.retry.load(std::memory_order_relaxed) ||
-                                           mid < 0 ||
-                                           now - sub.sent_us.load(std::memory_order_relaxed) >
-                                               10 * 1000000ull);
+                                          (sub.retry.load(std::memory_order_relaxed) || mid < 0 ||
+                                           now - sub.sent_us.load(std::memory_order_relaxed) > 10 * 1000000ull);
                         if (!want) {
                             continue;
                         }
@@ -328,24 +370,35 @@ public:
                 }
             }
 
+            process_connected_work();
+
+            // Control-plane work above gets priority over lossy log
+            // telemetry, especially after reconnect with a full log queue.
+            soulcloud::log_sender::instance().drain();
+
             // periodic stat report (publish may block for a network
             // timeout; that is acceptable here on the core task, but must
             // never happen on the shared esp_timer task)
             const uint64_t now = (uint64_t)esp_timer_get_time();
-            if (owner.started && now >= next_stat_us) {
+            if (owner.started.load(std::memory_order_acquire) && now >= next_stat_us) {
                 if (owner.impl != nullptr && owner.impl->bridge.is_connected()) {
                     owner.report_stat();
                 }
                 next_stat_us = now + (uint64_t)owner._cfg.stat_interval_s * 1000000ull;
             }
 
-            if (exit) {
+            if (exit_requested.load(std::memory_order_acquire)) {
                 break;
             }
             // loop back into xTaskNotifyWait (no fixed delay)
         }
-        task = nullptr;  // tell destroy()/wake_core() we are gone
-        vTaskDelete(nullptr);
+        task_exited.store(true, std::memory_order_release);
+        // Keep the task/handle alive until destroy() stops MQTT and log
+        // producers, then deletes this parked worker. A notification is
+        // deliberately unable to release this park: MQTT may still notify
+        // between task_exited and bridge.deinit(), and returning from the
+        // task entry point would leave destroy() with a stale handle.
+        vTaskSuspend(nullptr);
     }
 
     /**
@@ -355,8 +408,8 @@ public:
      *
      * Order matters (use-after-free audit):
      *  1. The core task consumes inbound_rb and the log ring buffer, so it
-     *     must exit first (it polls on a 1-tick interval and self-deletes;
-     *     the forced vTaskDelete is a watchdog-only fallback).
+     *     must park first. It remains allocated until every producer has
+     *     stopped; forced deletion is a watchdog-only fallback.
      *  2. The MQTT client is destroyed BEFORE the inbound ring buffer:
      *     the esp-mqtt event task may be blocked inside on_mqtt_data() on
      *     xRingbufferSend() (100 ms backpressure wait), and
@@ -373,9 +426,14 @@ public:
             return;
         }
 
+        bool core_forced = false;
         if (impl->task != nullptr) {
-            impl->exit = true;
-            impl->wake_core();  // the task blocks in xTaskNotifyWait; nudge it
+            // Stop log callbacks from adding notifications before the core
+            // publishes its parked state. MQTT callbacks may still notify,
+            // but the handle remains live until bridge.deinit() below.
+            soulcloud::log_sender::instance().set_wake(nullptr, nullptr);
+            impl->exit_requested.store(true, std::memory_order_release);
+            impl->wake_core(); // the task blocks in xTaskNotifyWait; nudge it
             // Wait generously (30 s): the core task may be inside
             // esp_mqtt_client_publish(), which blocks for up to the
             // network timeout, and deleting it there would corrupt the
@@ -383,16 +441,16 @@ public:
             // (ESP-R5). Command handlers are application code and may
             // legitimately take long too. The forced delete below is a
             // last resort for a wedged task.
-            for (uint32_t i = 0; i < 3000 && impl->task != nullptr; ++i) {
-                vTaskDelay(pdMS_TO_TICKS(10));
+            const TickType_t wait_ticks = pdMS_TO_TICKS(30000);
+            for (TickType_t i = 0; i < wait_ticks && !impl->task_exited.load(std::memory_order_acquire); ++i) {
+                vTaskDelay(1);
             }
-            if (impl->task != nullptr) {
-                // forced (should not happen): first detach the log sink's
-                // wake callback so no producer can notify a dead task
-                soulcloud::log_sender::instance().set_wake(nullptr, nullptr);
+            if (!impl->task_exited.load(std::memory_order_acquire)) {
+                core_forced = true;
+                ESP_LOGE(TAG, "core task did not stop within 30 s; force-deleting");
                 vTaskDelete(impl->task);
+                impl->task = nullptr;
             }
-            impl->task = nullptr;
         }
 
         // Stop the OTA executor BEFORE the MQTT client: its deinit waits
@@ -411,6 +469,10 @@ public:
             impl->inbound_rb = nullptr;
         }
         soulcloud::log_sender::instance().deinit();
+        if (impl->task != nullptr && !core_forced) {
+            vTaskDelete(impl->task);
+        }
+        impl->task = nullptr;
         delete impl;
         self.impl = nullptr;
     }
@@ -437,7 +499,7 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     }
 
     _cfg = *cfg;
-    impl = new client_impl(*this);  // sole heap allocation (deinit frees)
+    impl = new client_impl(*this); // sole heap allocation (deinit frees)
 
     const mqtt_callbacks cbs = {
         .on_connected = client_impl::mqtt_on_connected,
@@ -464,9 +526,8 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     // back-to-back sends and splits items at the wrap point, which would
     // corrupt the message framing the consumer relies on. The maximum
     // record (4 + CONFIG_SOULCLOUD_INBOUND_MAX) must fit in the buffer.
-    impl->inbound_rb = xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_INBOUND_RB_SIZE,
-                                                   RINGBUF_TYPE_NOSPLIT,
-                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    impl->inbound_rb =
+        xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_INBOUND_RB_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (impl->inbound_rb == nullptr) {
         client_impl::destroy(*this);
         return ESP_ERR_NO_MEM;
@@ -474,19 +535,18 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     // NOSPLIT stores items whole; the largest storable item is roughly
     // half the buffer. Refuse to run with a configuration where a legal
     // maximum-size record can never be queued (permanent silent drops).
-    if (CONFIG_SOULCLOUD_INBOUND_RB_SIZE <
-        2 * (sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX)) {
-        ESP_LOGE(TAG, "SOULCLOUD_INBOUND_RB_SIZE %d too small: must be >= %u "
-                      "(NOSPLIT half-buffer limit)",
+    if (CONFIG_SOULCLOUD_INBOUND_RB_SIZE < 2 * (sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX)) {
+        ESP_LOGE(TAG,
+                 "SOULCLOUD_INBOUND_RB_SIZE %d too small: must be >= %u "
+                 "(NOSPLIT half-buffer limit)",
                  CONFIG_SOULCLOUD_INBOUND_RB_SIZE,
                  2u * (unsigned)(sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX));
         client_impl::destroy(*this);
         return ESP_ERR_INVALID_ARG;
     }
     TaskHandle_t task = nullptr;
-    err = xTaskCreateWithCaps(client_impl::task_main, "soulcloud_core",
-                              CONFIG_SOULCLOUD_CORE_TASK_STACK, impl,
-                              5, &task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    err = xTaskCreateWithCaps(client_impl::task_main, "soulcloud_core", CONFIG_SOULCLOUD_CORE_TASK_STACK, impl, 5, &task,
+                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     impl->task = task;
     if (err != pdPASS) {
         client_impl::destroy(*this);
@@ -521,15 +581,16 @@ esp_err_t soulcloud::soulcloud_client::start()
     if (!inited || impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (started) {
+    if (started.load(std::memory_order_acquire)) {
         return ESP_OK;
     }
     esp_err_t err = impl->bridge.start();
     if (err != ESP_OK) {
         return err;
     }
-    started = true;
-    impl->next_stat_us = 0;  // first stat fires on the next core-task tick
+    started.store(true, std::memory_order_release);
+    impl->reset_stat_deadline.store(true, std::memory_order_release);
+    impl->wake_core();
     return ESP_OK;
 }
 
@@ -539,8 +600,9 @@ esp_err_t soulcloud::soulcloud_client::stop()
         return ESP_ERR_INVALID_STATE;
     }
     impl->bridge.stop();
-    started = false;
-    connected = false;
+    started.store(false, std::memory_order_release);
+    connected.store(false, std::memory_order_release);
+    impl->wake_core();
     return ESP_OK;
 }
 
@@ -551,8 +613,8 @@ esp_err_t soulcloud::soulcloud_client::deinit()
     }
     client_impl::destroy(*this);
     inited = false;
-    started = false;
-    connected = false;
+    started.store(false, std::memory_order_release);
+    connected.store(false, std::memory_order_release);
     return ESP_OK;
 }
 
@@ -616,7 +678,7 @@ esp_err_t soulcloud::soulcloud_client::report_stat()
 
 void soulcloud::soulcloud_client::on_mqtt_connected()
 {
-    connected = true;
+    connected.store(true, std::memory_order_release);
 
     // Reset the subscription tracking; the actual subscribe() calls are
     // issued by the core-task watchdog (single writer for msg_id/sent_us,
@@ -634,17 +696,10 @@ void soulcloud::soulcloud_client::on_mqtt_connected()
 
     ESP_LOGI(TAG, "connected; downlink subscriptions pending");
 
-    // wake the core task so it drains log packets buffered during the
-    // outage (drain() returns early while disconnected, leaving the
-    // ring buffer intact) and re-evaluates the SUBACK watchdog
+    // The core task owns blocking stat/NVS work and prioritises it plus
+    // subscription recovery ahead of buffered logs.
+    impl->connected_work_pending.store(true, std::memory_order_release);
     impl->wake_core();
-    report_stat();
-
-    // First successful connect after an OTA reboot = the new firmware is
-    // healthy: promote the pending release (and cancel the bootloader
-    // rollback). Idempotent; a rollback never reaches this point, so a
-    // rolled-back device still accepts the same release again.
-    soulcloud::ota_executor::instance().finalize_pending_ota();
 
     if (conn_cb != nullptr) {
         conn_cb(true, conn_ctx);
@@ -653,7 +708,8 @@ void soulcloud::soulcloud_client::on_mqtt_connected()
 
 void soulcloud::soulcloud_client::on_mqtt_disconnected()
 {
-    connected = false;
+    connected.store(false, std::memory_order_release);
+    impl->connected_work_pending.store(false, std::memory_order_release);
     impl->sub_gen.fetch_add(1, std::memory_order_relaxed);
     impl->downlink_ready.store(false, std::memory_order_relaxed);
     for (auto &sub : impl->subs) {
@@ -680,8 +736,7 @@ void soulcloud::soulcloud_client::on_subscribed(int msg_id, int return_code, boo
     // single-writer discipline: this runs on the mqtt event task and only
     // flips done/retry; the core-task watchdog owns subscribe() calls
     for (auto &sub : impl->subs) {
-        if (sub.msg_id.load(std::memory_order_relaxed) != msg_id ||
-            sub.done.load(std::memory_order_relaxed)) {
+        if (sub.msg_id.load(std::memory_order_relaxed) != msg_id || sub.done.load(std::memory_order_relaxed)) {
             continue;
         }
         if (failed || return_code >= 0x80) {
@@ -695,8 +750,7 @@ void soulcloud::soulcloud_client::on_subscribed(int msg_id, int return_code, boo
         }
         break;
     }
-    if (impl->subs[0].done.load(std::memory_order_relaxed) &&
-        impl->subs[1].done.load(std::memory_order_relaxed)) {
+    if (impl->subs[0].done.load(std::memory_order_relaxed) && impl->subs[1].done.load(std::memory_order_relaxed)) {
         impl->downlink_ready.store(true, std::memory_order_relaxed);
         // explicit readiness line for the harness and operators; the E2E
         // tests wait for this instead of the (removed) "subscribed" log
@@ -704,8 +758,7 @@ void soulcloud::soulcloud_client::on_subscribed(int msg_id, int return_code, boo
     }
 }
 
-void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_len,
-                                    const uint8_t *data, size_t data_len)
+void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_len, const uint8_t *data, size_t data_len)
 {
     if (impl == nullptr || impl->inbound_rb == nullptr) {
         return;
@@ -737,32 +790,25 @@ void soulcloud::soulcloud_client::on_mqtt_data(const char *topic, size_t topic_l
         return;
     }
 
-    // Assemble one ring buffer item: [header][payload]. The header lives
-    // on this stack; the payload is copied in. Commands/notices are
-    // low-rate, so the short-lived PSRAM allocation is acceptable (the
-    // ring buffer copies the bytes, then we free the staging buffer).
-    client_impl::inbound_header hdr = {};
-    hdr.kind = (uint8_t)kind;
-    hdr.len = (uint16_t)data_len;
-    const size_t item_len = sizeof(hdr) + data_len;
-    uint8_t *item = (uint8_t *)heap_caps_malloc(item_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (item == nullptr) {
-        ESP_LOGW(TAG, "no memory for inbound staging buffer; dropping");
+    // Reserve the final NOSPLIT item and write into it directly. This
+    // removes the per-message heap allocation and the staging copy.
+    const size_t item_len = sizeof(client_impl::inbound_header) + data_len;
+    client_impl::inbound_header *item = nullptr;
+    if (xRingbufferSendAcquire(impl->inbound_rb, (void **)&item, item_len, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "inbound ring buffer full; dropping %u-byte message", (unsigned)data_len);
         return;
     }
-    memcpy(item, &hdr, sizeof(hdr));
-    memcpy(item + sizeof(hdr), data, data_len);
-
-    // bounded wait for a free slot (backpressure); drop when full.
-    // NOTE: the esp-mqtt layer will PUBACK regardless of what happens
-    // here, so drops are observable only via this log line (see the
-    // ESP-03(c) notes); commands get an error result from the core.
-    if (xRingbufferSend(impl->inbound_rb, item, item_len, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGW(TAG, "inbound ring buffer full; dropping %u-byte message", (unsigned)data_len);
-    } else {
-        impl->wake_core();  // drain the queue immediately (event-driven)
+    item->kind = (uint8_t)kind;
+    item->pad = 0;
+    item->len = (uint16_t)data_len;
+    if (data_len > 0) {
+        memcpy((uint8_t *)item + sizeof(*item), data, data_len);
     }
-    heap_caps_free(item);
+    if (xRingbufferSendComplete(impl->inbound_rb, item) == pdTRUE) {
+        impl->wake_core(); // drain the queue immediately (event-driven)
+    } else {
+        ESP_LOGE(TAG, "inbound ring buffer commit failed");
+    }
 }
 
 void soulcloud::soulcloud_client::dispatch_command(const uint8_t *payload, size_t len)
@@ -780,7 +826,7 @@ void soulcloud::soulcloud_client::dispatch_command(const uint8_t *payload, size_
             result.seq = seq;
             result.args = nullptr;
             result.arg_count = 0;
-            result.code = soulcloud::command_registry::CMD_RESULT_ERR_BUSY;  // -4
+            result.code = soulcloud::command_registry::CMD_RESULT_ERR_BUSY; // -4
             uint8_t buf[1024] = {};
             size_t out_len = 0;
             if (encode_command_result(buf, sizeof(buf), &out_len, &result) == ERR_OK) {
@@ -793,8 +839,7 @@ void soulcloud::soulcloud_client::dispatch_command(const uint8_t *payload, size_
         return;
     }
     uint8_t result_buf[1024] = {};
-    const int32_t n = soulcloud::command_registry::instance().dispatch(payload, len,
-                                                            result_buf, sizeof(result_buf));
+    const int32_t n = soulcloud::command_registry::instance().dispatch(payload, len, result_buf, sizeof(result_buf));
     if (n > 0) {
         char topic[160] = {};
         topic_cmd_result(topic, sizeof(topic), _cfg.device_uid);

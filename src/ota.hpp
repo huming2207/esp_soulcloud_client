@@ -19,6 +19,7 @@
 
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <mbedtls/md.h>
 
 #include "soulcloud.hpp"
 
@@ -30,9 +31,9 @@ namespace soulcloud
     /**
      * @brief OTA executor (singleton).
      *
-     * One OTA flow at a time: start() copies the notice into internal
-     * storage and spawns a dedicated task that downloads, verifies,
-     * flashes and restarts. Commands are ignored while active
+     * One OTA flow at a time: init() creates a persistent worker; start()
+     * copies the notice into internal storage and wakes that worker to
+     * download, verify, flash and restart. Commands are rejected as busy while active
      * (soulcloud_client checks is_active()).
      */
     class ota_executor
@@ -65,13 +66,12 @@ namespace soulcloud
         /**
          * @brief Release cfg/bridge (idempotent).
          *
-         * Waits (bounded) for an in-flight OTA task to finish before
+         * Waits (bounded) for an in-flight OTA operation to finish before
          * releasing the pointers it dereferences: the task reports its
          * state through the bridge and reads the config on every exit
          * path, so freeing them under it used to be a NULL deref. If the
-         * task is still alive after the wait (e.g. a stuck download), it
-         * is force-deleted; the HTTP/OTA handles it held are leaked but
-         * nothing dereferences freed pointers.
+         * worker is still active after the wait (e.g. a stuck download), it
+         * is force-deleted as a last resort.
          */
         void deinit();
 
@@ -94,12 +94,15 @@ namespace soulcloud
         void finalize_pending_ota();
 
         /** @brief True while an OTA download/flash is in progress. */
-        bool is_active() const { return active.load(std::memory_order_acquire); }
+        bool is_active() const
+        {
+            return active.load(std::memory_order_acquire);
+        }
 
         /**
          * @brief Start the OTA flow for a validated notice.
          *
-         * Copies the notice and spawns the OTA task. Refuses to start
+         * Copies the notice and wakes the init-created OTA task. Refuses to start
          * while another OTA is active; a notice for a release that is
          * already running (NVS dedupe) is acknowledged with an
          * "installed" result for the notice's job instead of being
@@ -110,7 +113,6 @@ namespace soulcloud
          *  - ESP_OK
          *  - ESP_ERR_INVALID_STATE if not init'd or already active
          *  - ESP_ERR_INVALID_SIZE   if bin_size exceeds cfg->ota_max_bytes
-         *  - ESP_ERR_NO_MEM         if the task could not be created
          */
         esp_err_t start(const ota_notice *notice);
 
@@ -124,8 +126,7 @@ namespace soulcloud
         static constexpr char NVS_KEY_LAST_REL[] = "ota_rel";
         static constexpr char NVS_KEY_PENDING_REL[] = "ota_pend";
 
-        struct ota_fail
-        {
+        struct ota_fail {
             int32_t code;
             const char *msg;
         };
@@ -133,14 +134,17 @@ namespace soulcloud
         const config *_cfg = nullptr;
         mqtt_bridge *_bridge = nullptr;
         // cross-task lifecycle state (ESP-R6): atomics with documented
-        // ownership — the OTA task clears task/active on exit, start()
-        // sets them, deinit() waits/reads
+        // ownership — init/deinit own the persistent worker handle; the
+        // worker clears active after each operation
         std::atomic<TaskHandle_t> task{nullptr};
         std::atomic<bool> active{false};
+        std::atomic<bool> exit_requested{false};
+        std::atomic<bool> worker_exited{false};
+        mbedtls_md_context_t sha_ctx = {};
+        bool sha_ready = false;
 
         // the notice under execution (single in-flight OTA at a time)
-        struct notice_copy
-        {
+        struct notice_copy {
             char release_id[37];
             char job_id[37];
             char bin_sha256[65];
@@ -151,14 +155,13 @@ namespace soulcloud
         notice_copy pending = {};
 
         void run();
-        void park_and_wait_for_reap();
-        bool download_and_verify(esp_ota_handle_t *ota_handle_out,
-                                 const esp_partition_t **partition_out,
-                                 size_t *total_out, ota_fail *fail);
+        void run_once();
+        bool download_and_verify(esp_ota_handle_t *ota_handle_out, const esp_partition_t **partition_out, size_t *total_out,
+                                 ota_fail *fail);
         void report_state(const char *state, int32_t code, const char *message);
         bool last_ota_matches(const char *release_id) const;
         void store_pending_ota(const char *release_id);
 
         static void task_trampoline(void *ctx);
     };
-}  // namespace soulcloud
+} // namespace soulcloud
