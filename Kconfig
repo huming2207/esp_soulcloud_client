@@ -176,7 +176,10 @@ menu "Soulcloud client"
             Total capacity of the FreeRTOS ring buffer that queues inbound
             cmd/exec and ota payloads between the MQTT event callback and
             the core dispatch task. A burst of messages is drained in
-            order; when full, the callback waits up to 100 ms then drops
+            order; when full, the callback waits up to 100 ms then drops.
+            NOSPLIT stores items whole and the largest storable item is
+            roughly half the buffer: values below 2 x (4 + INBOUND_MAX)
+            make init fail with ESP_ERR_INVALID_ARG.
             (backpressure). Allocated from PSRAM when available.
 
 endmenu
