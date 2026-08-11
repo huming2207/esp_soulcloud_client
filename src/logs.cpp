@@ -38,10 +38,22 @@ esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
     const uint32_t rb_caps = _cfg->log_rb_internal
                                  ? (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
                                  : (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    log_rb = xRingbufferCreateWithCaps(_cfg->log_rb_size, RINGBUF_TYPE_BYTEBUF, rb_caps);
+    // NOSPLIT: each receive returns exactly one log packet. BYTEBUF
+    // would merge back-to-back packets and split items at the wrap point
+    // (the consumer treats each item as one complete on9log packet).
+    // Packets up to PACKET_MAX (4 KiB) must fit in the buffer.
+    log_rb = xRingbufferCreateWithCaps(_cfg->log_rb_size, RINGBUF_TYPE_NOSPLIT, rb_caps);
     if (log_rb == nullptr) {
         _sink_mutex = nullptr;
         return ESP_ERR_NO_MEM;
+    }
+    // NOSPLIT stores items whole; the largest storable item is roughly
+    // half the buffer. Smaller buffers silently drop every packet above
+    // that (counted, so visible via the drop WARN, but worth a warning).
+    if (_cfg->log_rb_size < 2 * PACKET_MAX) {
+        ESP_LOGW(TAG, "log_rb_size %lu < 2*PACKET_MAX (%u): packets near "
+                      "%u bytes can never be queued (NOSPLIT half-buffer limit)",
+                 (unsigned long)_cfg->log_rb_size, PACKET_MAX, PACKET_MAX);
     }
 
     const on9log_sink_t sink = {

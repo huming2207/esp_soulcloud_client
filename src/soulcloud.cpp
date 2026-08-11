@@ -5,6 +5,7 @@
 
 #include "soulcloud.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -80,8 +81,11 @@ public:
     explicit client_impl(soulcloud_client &owner) : owner(owner) {}
 
     mqtt_bridge bridge;
-    esp_timer_handle_t stat_timer = nullptr;
     soulcloud_client &owner;
+    // periodic stat deadline (us since boot) maintained by the core task;
+    // no esp_timer: publish can block for a network timeout and must not
+    // run on the shared esp_timer task
+    uint64_t next_stat_us = 0;
 
     // Dedicated inbound dispatch task: command handlers and OTA notice
     // handling are application-ish code with unpredictable stack needs;
@@ -92,6 +96,23 @@ public:
     volatile TaskHandle_t task = nullptr;
     RingbufHandle_t inbound_rb = nullptr;
     volatile bool exit = false;
+
+    // Downlink subscription tracking. Concurrency: the mqtt event task
+    // only writes done/retry (on_subscribed); the core task owns
+    // msg_id/sent_us and every subscribe() call (single-writer per
+    // field, atomics for the cross-task ones). downlink_ready is a
+    // one-way latch written by the mqtt task, read by applications.
+    struct sub_slot
+    {
+        std::atomic<int> msg_id{-1};   // esp-mqtt message id, -1 = none
+        bool ota = false;              // true = ota topic, false = cmd/exec
+        std::atomic<bool> done{false}; // SUBACK received and accepted
+        std::atomic<bool> retry{false};// rejected/failed: re-issue needed
+        std::atomic<uint64_t> sent_us{0};
+    };
+    sub_slot subs[2] = {};
+    std::atomic<bool> downlink_ready{false};
+    std::atomic<uint32_t> sub_gen{0};  // bumped on connect/disconnect
 
     enum inbound_kind : uint8_t {
         INBOUND_NONE = 0,
@@ -118,15 +139,15 @@ public:
         static_cast<client_impl *>(ctx)->owner.on_mqtt_disconnected();
     }
 
+    static void mqtt_on_subscribed(void *ctx, int msg_id, int return_code, bool failed)
+    {
+        static_cast<client_impl *>(ctx)->owner.on_subscribed(msg_id, return_code, failed);
+    }
+
     static void mqtt_on_data(void *ctx, const char *topic, size_t topic_len,
                              const uint8_t *data, size_t data_len)
     {
         static_cast<client_impl *>(ctx)->owner.on_mqtt_data(topic, topic_len, data, data_len);
-    }
-
-    static void stat_timer_cb(void *ctx)
-    {
-        static_cast<client_impl *>(ctx)->owner.report_stat();
     }
 
     static void task_main(void *ctx)
@@ -170,6 +191,55 @@ public:
 
             // drain queued log packets (throttled publish, never blocks)
             soulcloud::log_sender::instance().drain();
+
+            // SUBACK watchdog: the only writer of msg_id/sent_us and the
+            // only caller of subscribe() (single-writer discipline).
+            // Re-issues when: no SUBACK within 10 s, subscribe() returned
+            // -1 (esp-mqtt refuses when not connected), or the broker
+            // rejected the subscription (retry flag from on_subscribed).
+            // A generation counter guards against stale write-backs
+            // racing a reconnect. Backoff prevents -1 slots from being
+            // re-issued every tick while disconnected.
+            {
+                const uint64_t now = (uint64_t)esp_timer_get_time();
+                if (bridge.is_connected()) {
+                    for (auto &sub : subs) {
+                        const int mid = sub.msg_id.load(std::memory_order_relaxed);
+                        const bool want = !sub.done.load(std::memory_order_relaxed) &&
+                                          (sub.retry.load(std::memory_order_relaxed) ||
+                                           mid < 0 ||
+                                           now - sub.sent_us.load(std::memory_order_relaxed) >
+                                               10 * 1000000ull);
+                        if (!want) {
+                            continue;
+                        }
+                        char topic[160] = {};
+                        if (sub.ota) {
+                            topic_ota(topic, sizeof(topic), owner._cfg.device_uid);
+                        } else {
+                            topic_cmd_exec(topic, sizeof(topic), owner._cfg.device_uid);
+                        }
+                        const uint32_t gen = sub_gen.load(std::memory_order_relaxed);
+                        const int new_id = (int)bridge.subscribe(topic, 1);
+                        if (gen == sub_gen.load(std::memory_order_relaxed)) {
+                            sub.retry.store(false, std::memory_order_relaxed);
+                            sub.msg_id.store(new_id, std::memory_order_relaxed);
+                            sub.sent_us.store(now, std::memory_order_relaxed);
+                        }
+                    }
+                }
+            }
+
+            // periodic stat report (publish may block for a network
+            // timeout; that is acceptable here on the core task, but must
+            // never happen on the shared esp_timer task)
+            const uint64_t now = (uint64_t)esp_timer_get_time();
+            if (owner.started && now >= next_stat_us) {
+                if (owner.impl != nullptr && owner.impl->bridge.is_connected()) {
+                    owner.report_stat();
+                }
+                next_stat_us = now + (uint64_t)owner._cfg.stat_interval_s * 1000000ull;
+            }
 
             if (exit) {
                 break;
@@ -216,12 +286,6 @@ public:
                 vTaskDelete(impl->task);  // forced (should not happen)
             }
             impl->task = nullptr;
-        }
-
-        if (impl->stat_timer != nullptr) {
-            esp_timer_stop(impl->stat_timer);
-            esp_timer_delete(impl->stat_timer);
-            impl->stat_timer = nullptr;
         }
 
         // Stop the OTA executor BEFORE the MQTT client: its deinit waits
@@ -272,6 +336,7 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
         .on_connected = client_impl::mqtt_on_connected,
         .on_disconnected = client_impl::mqtt_on_disconnected,
         .on_data = client_impl::mqtt_on_data,
+        .on_subscribed = client_impl::mqtt_on_subscribed,
         .on_error = nullptr,
         .ctx = impl,
     };
@@ -282,30 +347,30 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
         return err;
     }
 
-    const esp_timer_create_args_t timer_args = {
-        .callback = client_impl::stat_timer_cb,
-        .arg = impl,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "soulcloud_stat",
-        .skip_unhandled_events = false,
-    };
-    err = esp_timer_create(&timer_args, &impl->stat_timer);
-    if (err != ESP_OK) {
-        client_impl::destroy(*this);
-        return err;
-    }
-
     // Dedicated inbound dispatch task: handlers are application code with
     // unpredictable stack needs, so they run here (large, PSRAM-backed
     // stack) instead of on the esp-mqtt/esp_timer task stacks. Inbound
-    // messages queue up in a FreeRTOS ring buffer (bytebuf), so a burst
+    // messages queue up in a FreeRTOS NOSPLIT ring buffer, so a burst
     // of commands/notices is drained in order instead of dropped.
+    // NOSPLIT: every xRingbufferReceive returns exactly one item (one
+    // [header][payload] record). BYTEBUF is a byte stream that merges
+    // back-to-back sends and splits items at the wrap point, which would
+    // corrupt the message framing the consumer relies on. The maximum
+    // record (4 + CONFIG_SOULCLOUD_INBOUND_MAX) must fit in the buffer.
     impl->inbound_rb = xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_INBOUND_RB_SIZE,
-                                                   RINGBUF_TYPE_BYTEBUF,
+                                                   RINGBUF_TYPE_NOSPLIT,
                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (impl->inbound_rb == nullptr) {
         client_impl::destroy(*this);
         return ESP_ERR_NO_MEM;
+    }
+    // NOSPLIT: largest storable item is ~half the buffer; warn when the
+    // configured buffer cannot hold a maximum-size inbound record.
+    if (CONFIG_SOULCLOUD_INBOUND_RB_SIZE <
+        2 * (sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX)) {
+        ESP_LOGW(TAG, "SOULCLOUD_INBOUND_RB_SIZE %d too small for "
+                      "maximum-size inbound records (NOSPLIT half-buffer limit)",
+                 CONFIG_SOULCLOUD_INBOUND_RB_SIZE);
     }
     TaskHandle_t task = nullptr;
     err = xTaskCreateWithCaps(client_impl::task_main, "soulcloud_core",
@@ -350,9 +415,7 @@ esp_err_t soulcloud::soulcloud_client::start()
         return err;
     }
     started = true;
-    if (impl->stat_timer != nullptr) {
-        esp_timer_start_periodic(impl->stat_timer, (uint64_t)_cfg.stat_interval_s * 1000000ull);
-    }
+    impl->next_stat_us = 0;  // first stat fires on the next core-task tick
     return ESP_OK;
 }
 
@@ -360,9 +423,6 @@ esp_err_t soulcloud::soulcloud_client::stop()
 {
     if (!inited || impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
-    }
-    if (impl->stat_timer != nullptr) {
-        esp_timer_stop(impl->stat_timer);
     }
     impl->bridge.stop();
     started = false;
@@ -444,13 +504,21 @@ void soulcloud::soulcloud_client::on_mqtt_connected()
 {
     connected = true;
 
-    char topic[160] = {};
-    topic_cmd_exec(topic, sizeof(topic), _cfg.device_uid);
-    impl->bridge.subscribe(topic, 1);
-    topic_ota(topic, sizeof(topic), _cfg.device_uid);
-    impl->bridge.subscribe(topic, 1);
+    // Reset the subscription tracking; the actual subscribe() calls are
+    // issued by the core-task watchdog (single writer for msg_id/sent_us,
+    // see sub_slot). downlink_ready latches once both SUBACKs arrive.
+    impl->sub_gen.fetch_add(1, std::memory_order_relaxed);
+    impl->downlink_ready.store(false, std::memory_order_relaxed);
+    impl->subs[0].ota = false;
+    impl->subs[1].ota = true;
+    for (auto &sub : impl->subs) {
+        sub.done.store(false, std::memory_order_relaxed);
+        sub.retry.store(false, std::memory_order_relaxed);
+        sub.msg_id.store(-1, std::memory_order_relaxed);
+        sub.sent_us.store(0, std::memory_order_relaxed);
+    }
 
-    ESP_LOGI(TAG, "connected; subscribed to cmd/exec and ota");
+    ESP_LOGI(TAG, "connected; downlink subscriptions pending");
     report_stat();
 
     // First successful connect after an OTA reboot = the new firmware is
@@ -467,8 +535,47 @@ void soulcloud::soulcloud_client::on_mqtt_connected()
 void soulcloud::soulcloud_client::on_mqtt_disconnected()
 {
     connected = false;
+    impl->sub_gen.fetch_add(1, std::memory_order_relaxed);
+    impl->downlink_ready.store(false, std::memory_order_relaxed);
+    for (auto &sub : impl->subs) {
+        sub.done.store(false, std::memory_order_relaxed);
+        sub.retry.store(false, std::memory_order_relaxed);
+        sub.msg_id.store(-1, std::memory_order_relaxed);
+        sub.sent_us.store(0, std::memory_order_relaxed);
+    }
     if (conn_cb != nullptr) {
         conn_cb(false, conn_ctx);
+    }
+}
+
+bool soulcloud::soulcloud_client::downlink_ready() const
+{
+    return impl != nullptr && impl->downlink_ready;
+}
+
+void soulcloud::soulcloud_client::on_subscribed(int msg_id, int return_code, bool failed)
+{
+    if (impl == nullptr) {
+        return;
+    }
+    // single-writer discipline: this runs on the mqtt event task and only
+    // flips done/retry; the core-task watchdog owns subscribe() calls
+    for (auto &sub : impl->subs) {
+        if (sub.msg_id.load(std::memory_order_relaxed) != msg_id ||
+            sub.done.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        if (failed || return_code >= 0x80) {
+            ESP_LOGW(TAG, "subscribe rejected (rc=%d); will retry", return_code);
+            sub.retry.store(true, std::memory_order_relaxed);
+        } else {
+            sub.done.store(true, std::memory_order_relaxed);
+        }
+        break;
+    }
+    if (impl->subs[0].done.load(std::memory_order_relaxed) &&
+        impl->subs[1].done.load(std::memory_order_relaxed)) {
+        impl->downlink_ready.store(true, std::memory_order_relaxed);
     }
 }
 

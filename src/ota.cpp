@@ -20,6 +20,9 @@
 #include <esp_partition.h>
 #include <mbedtls/md.h>
 #include <nvs.h>
+#ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+#include <esp_crt_bundle.h>
+#endif
 
 #include "mqtt_bridge.hpp"
 #include "protocol.hpp"
@@ -153,9 +156,16 @@ esp_err_t soulcloud::ota_executor::start(const ota_notice *notice)
         return ESP_ERR_INVALID_STATE;
     }
 
-    // dedupe: this release is already running
+    // dedupe: this release is already running. The backend mints a fresh
+    // job/target per deploy, so the notice's job must still be
+    // acknowledged or the target stalls and fails even though the
+    // desired firmware is running.
     if (last_ota_matches(notice->release_id)) {
-        ESP_LOGI(TAG, "release %s already applied; ignoring notice", notice->release_id);
+        ESP_LOGI(TAG, "release %s already applied; acking job %s",
+                 notice->release_id, notice->job_id);
+        snprintf(pending.release_id, sizeof(pending.release_id), "%s", notice->release_id);
+        snprintf(pending.job_id, sizeof(pending.job_id), "%s", notice->job_id);
+        report_state("installed", 0, "already applied");
         return ESP_OK;
     }
 
@@ -234,6 +244,9 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     http_cfg.buffer_size = (int)CHUNK;
     http_cfg.user_agent = "soulcloud-esp32";
     http_cfg.disable_auto_redirect = true;
+#ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+    http_cfg.crt_bundle_attach = esp_crt_bundle_attach;  // https:// download
+#endif
 
     esp_http_client_handle_t http = esp_http_client_init(&http_cfg);
     if (http == nullptr) {
@@ -326,6 +339,19 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
         esp_http_client_cleanup(http);
         mbedtls_md_free(&sha);
         *fail = {-1, "download failed"};
+        return false;
+    }
+
+    // the notice's declared size is authoritative; a mismatch means the
+    // server metadata or the transfer was wrong (SHA-256 below still
+    // protects integrity, but the size check keeps telemetry honest)
+    if (total != pending.bin_size) {
+        ESP_LOGE(TAG, "size mismatch: got %zu bytes, notice declared %u",
+                 total, pending.bin_size);
+        esp_ota_abort(ota_handle);
+        esp_http_client_cleanup(http);
+        mbedtls_md_free(&sha);
+        *fail = {-5, "size mismatch"};
         return false;
     }
 

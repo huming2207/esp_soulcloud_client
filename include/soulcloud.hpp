@@ -186,8 +186,10 @@ namespace soulcloud
     /**
      * @brief Soulcloud device client (singleton).
      *
-     * Owns the MQTT bridge, the stat timer, the log sink and the OTA
-     * executor. All state is internal (PIMPL). Long-lived heap
+     * Owns the MQTT bridge, the log sink and the OTA executor. All
+     * state is internal (PIMPL). The periodic stat report runs on the
+     * dedicated core task (never on the shared esp_timer task, since
+     * publish can block on the network). Long-lived heap
      * allocations happen in init()/deinit() (PIMPL, ring buffers);
      * inbound MQTT messages also allocate a per-message staging buffer
      * in on_mqtt_data().
@@ -250,6 +252,17 @@ namespace soulcloud
          * @return true when connected.
          */
         bool is_connected() const { return connected; }
+
+        /**
+         * @brief True once both downlink subscriptions (cmd/exec, ota)
+         *        have been acknowledged by the broker (SUBACK).
+         *
+         * Session-connected but not yet downlink-ready: a command or OTA
+         * notice published in this window can be lost. Applications that
+         * must not miss downlink traffic should gate on this instead of
+         * is_connected().
+         */
+        bool downlink_ready() const;  // defined in soulcloud.cpp (impl is pimpl)
 
         /**
          * @brief Set the connection state callback.
@@ -319,6 +332,8 @@ namespace soulcloud
          *  stack). */
         void on_mqtt_data(const char *topic, size_t topic_len,
                           const uint8_t *data, size_t data_len);
+        /** SUBACK / SUBSCRIBE_FAILED for one of the tracked subscribes. */
+        void on_subscribed(int msg_id, int return_code, bool failed);
         /** Core task: dispatches a copied cmd/exec payload. */
         void dispatch_command(const uint8_t *payload, size_t len);
         /** Core task: decodes and starts an OTA notice. */

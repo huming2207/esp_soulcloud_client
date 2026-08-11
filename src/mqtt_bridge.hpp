@@ -29,7 +29,10 @@ namespace soulcloud
         void (*on_connected)(void *ctx);   /**< MQTT session established. */
         void (*on_disconnected)(void *ctx); /**< MQTT session dropped. */
         void (*on_data)(void *ctx, const char *topic, size_t topic_len,
-                        const uint8_t *data, size_t data_len); /**< Inbound PUBLISH. */
+                        const uint8_t *data, size_t data_len); /**< Inbound PUBLISH (complete, reassembled). */
+        void (*on_subscribed)(void *ctx, int msg_id, int return_code, bool failed);
+        /**< SUBACK for a subscribe (return_code per topic, >=0x80 = rejected),
+         *  or a SUBSCRIBE_FAILED error (failed=true, return_code=-1). */
         void (*on_error)(void *ctx, esp_mqtt_error_codes_t *err); /**< Transport error (may be NULL). */
         void *ctx; /**< Opaque context passed to every callback. */
     };
@@ -74,8 +77,9 @@ namespace soulcloud
         /**
          * @brief Subscribe to a topic at the given QoS.
          *
-         * May be called from an event callback or any task; esp-mqtt
-         * queues the subscription if the session is not ready.
+         * May be called from an event callback or any task. Returns -1 if
+         * the client is not connected (no queueing in esp-mqtt v1.1.0);
+         * the core-task SUBACK watchdog retries.
          *
          * @return Message id, or a negative error.
          */
@@ -106,9 +110,26 @@ namespace soulcloud
         bool connected = false;
         mqtt_callbacks _cbs = {};
 
+        // ---- MQTT fragment reassembly ----
+        // One large PUBLISH arrives as several MQTT_EVENT_DATA events
+        // (total_data_len/current_data_offset); only the first carries
+        // the topic. Reassemble here so the core always sees one complete
+        // message (this also makes CONFIG_SOULCLOUD_INBOUND_MAX enforce
+        // the WHOLE payload, not each fragment).
+        struct frag_state
+        {
+            bool active = false;    // mid-stream
+            uint32_t total = 0;     // total_data_len of the current message
+            uint32_t received = 0;  // bytes buffered so far
+            uint8_t *buf = nullptr; // reassembly buffer (PSRAM, init-allocated)
+            char topic[160] = {};   // topic from the first fragment
+            size_t topic_len = 0;
+        } frag;
+
         static constexpr char TAG[] = "soulcloud_mqtt";
 
         static void event_handler(void *ctx, esp_event_base_t base, int32_t evt_id, void *evt_data);
         void handle_event(esp_mqtt_event_handle_t evt);
+        void handle_publish(esp_mqtt_event_handle_t evt);
     };
 }  // namespace soulcloud

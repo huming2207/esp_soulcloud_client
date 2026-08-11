@@ -99,8 +99,10 @@ namespace soulcloud
          * @brief Start the OTA flow for a validated notice.
          *
          * Copies the notice and spawns the OTA task. Refuses to start
-         * while another OTA is active, and ignores notices for a release
-         * that is already running (NVS dedupe).
+         * while another OTA is active; a notice for a release that is
+         * already running (NVS dedupe) is acknowledged with an
+         * "installed" result for the notice's job instead of being
+         * silently ignored.
          *
          * @param[in] notice Decoded OTA notice.
          * @return
