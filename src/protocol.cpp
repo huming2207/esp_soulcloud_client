@@ -41,35 +41,40 @@ soulcloud::msgpack_reader::~msgpack_reader()
 mpack_type_t soulcloud::msgpack_reader::peek_type()
 {
     mpack_tag_t tag = mpack_peek_tag(&r);
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
     return mpack_tag_type(&tag);
 }
 
 uint32_t soulcloud::msgpack_reader::expect_map()
 {
     const uint32_t n = mpack_expect_map(&r);
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
     return n;
 }
 
 uint32_t soulcloud::msgpack_reader::expect_array()
 {
     const uint32_t n = mpack_expect_array(&r);
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
     return n;
 }
 
 uint64_t soulcloud::msgpack_reader::expect_u64()
 {
     const uint64_t v = mpack_expect_u64(&r);
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
     return v;
 }
 
 int64_t soulcloud::msgpack_reader::expect_int()
 {
     const int64_t v = mpack_expect_int(&r);
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
     return v;
 }
 
@@ -90,14 +95,16 @@ int32_t soulcloud::msgpack_reader::expect_int32()
 bool soulcloud::msgpack_reader::expect_bool()
 {
     const bool v = mpack_expect_bool(&r);
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
     return v;
 }
 
 void soulcloud::msgpack_reader::expect_nil()
 {
     mpack_expect_nil(&r);
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
 }
 
 double soulcloud::msgpack_reader::expect_float()
@@ -119,7 +126,8 @@ double soulcloud::msgpack_reader::expect_float()
         fail(ERR_TYPE);
         return 0.0;
     }
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
     return v;
 }
 
@@ -202,12 +210,14 @@ int32_t soulcloud::msgpack_reader::read_bin(const uint8_t **ptr, uint32_t *len, 
 void soulcloud::msgpack_reader::skip_value()
 {
     mpack_discard(&r);
-    if (mpack_reader_error(&r) != mpack_ok) fail(ERR_BAD_MSG);
+    if (mpack_reader_error(&r) != mpack_ok)
+        fail(ERR_BAD_MSG);
 }
 
 int32_t soulcloud::msgpack_reader::finish()
 {
-    if (ret != ERR_OK) return ret;
+    if (ret != ERR_OK)
+        return ret;
     if (mpack_reader_error(&r) != mpack_ok) {
         fail(ERR_BAD_MSG);
         return ret;
@@ -237,86 +247,110 @@ soulcloud::msgpack_writer::~msgpack_writer()
 
 void soulcloud::msgpack_writer::start_map(uint32_t count)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_start_map(&w, count);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::finish_map()
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_finish_map(&w);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::start_array(uint32_t count)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_start_array(&w, count);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::finish_array()
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_finish_array(&w);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_str(const char *s)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_write_cstr(&w, s);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_str(const char *s, size_t len)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_write_str(&w, s, len);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_bin(const void *data, size_t len)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_write_bin(&w, (const char *)data, len);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_uint(uint64_t v)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_write_uint(&w, v);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_int(int64_t v)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_write_int(&w, v);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_nil()
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_write_nil(&w);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_bool(bool v)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_write_bool(&w, v);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 void soulcloud::msgpack_writer::write_double(double v)
 {
-    if (ret != ERR_OK) return;
+    if (ret != ERR_OK)
+        return;
     mpack_write_double(&w, v);
-    if (mpack_writer_error(&w) != mpack_ok) fail(ERR_OVERFLOW);
+    if (mpack_writer_error(&w) != mpack_ok)
+        fail(ERR_OVERFLOW);
 }
 
 size_t soulcloud::msgpack_writer::bytes_written()
@@ -326,7 +360,8 @@ size_t soulcloud::msgpack_writer::bytes_written()
 
 int32_t soulcloud::msgpack_writer::finish()
 {
-    if (destroyed) return ret;
+    if (destroyed)
+        return ret;
     if (ret == ERR_OK && mpack_writer_error(&w) != mpack_ok) {
         fail(ERR_OVERFLOW);
     }
@@ -467,8 +502,7 @@ static void write_args(msgpack_writer &w, const cmd_arg *args, uint32_t count)
 // command execution
 // ------------------------------------------------------------------ //
 
-int32_t soulcloud::decode_command_id(const uint8_t *payload, size_t len, uint8_t *id_out,
-                                      uint64_t *seq_out)
+int32_t soulcloud::decode_command_id(const uint8_t *payload, size_t len, uint8_t *id_out, uint64_t *seq_out)
 {
     msgpack_reader r(payload, len);
     const uint32_t map_count = r.expect_map();
@@ -516,47 +550,60 @@ int32_t soulcloud::decode_command_exec(const uint8_t *payload, size_t len, comma
 {
     msgpack_reader r(payload, len);
     const uint32_t map_count = r.expect_map();
-    if (!r.ok()) return r.err();
+    if (!r.ok())
+        return r.err();
 
-    uint32_t seen = 0;  // bit0=id bit1=seq bit2=cmd bit3=args
+    uint32_t seen = 0; // bit0=id bit1=seq bit2=cmd bit3=args
     command_exec tmp = {};
 
     for (uint32_t i = 0; i < map_count; ++i) {
         char key[24];
         size_t key_len = 0;
-        if (r.read_key(key, sizeof(key), &key_len) != ERR_OK) return r.err();
+        if (r.read_key(key, sizeof(key), &key_len) != ERR_OK)
+            return r.err();
 
         if (key_len == 2 && memcmp(key, "id", 2) == 0) {
-            if (seen & 1u) return ERR_DUP_KEY;
+            if (seen & 1u)
+                return ERR_DUP_KEY;
             seen |= 1u;
             uint32_t id_len = 0;
-            if (r.read_bin(&tmp.id, &id_len, 16) != ERR_OK) return r.err();
-            if (id_len != 16u) return ERR_FIELD_LEN;
+            if (r.read_bin(&tmp.id, &id_len, 16) != ERR_OK)
+                return r.err();
+            if (id_len != 16u)
+                return ERR_FIELD_LEN;
         } else if (key_len == 3 && memcmp(key, "seq", 3) == 0) {
-            if (seen & 2u) return ERR_DUP_KEY;
+            if (seen & 2u)
+                return ERR_DUP_KEY;
             seen |= 2u;
             tmp.seq = r.expect_u64();
         } else if (key_len == 3 && memcmp(key, "cmd", 3) == 0) {
-            if (seen & 4u) return ERR_DUP_KEY;
+            if (seen & 4u)
+                return ERR_DUP_KEY;
             seen |= 4u;
-            if (r.read_str(&tmp.cmd, &tmp.cmd_len, 255) != ERR_OK) return r.err();
+            if (r.read_str(&tmp.cmd, &tmp.cmd_len, 255) != ERR_OK)
+                return r.err();
         } else if (key_len == 4 && memcmp(key, "args", 4) == 0) {
-            if (seen & 8u) return ERR_DUP_KEY;
+            if (seen & 8u)
+                return ERR_DUP_KEY;
             seen |= 8u;
             if (r.peek_type() == mpack_type_nil) {
                 r.expect_nil();
             } else if (r.peek_type() == mpack_type_array) {
                 const uint32_t n = r.expect_array();
-                if (n > 8u) return ERR_OVERFLOW;
+                if (n > 8u)
+                    return ERR_OVERFLOW;
                 for (uint32_t j = 0; j < n; ++j) {
-                    if (r.expect_map() != 1u) return ERR_TYPE;
+                    if (r.expect_map() != 1u)
+                        return ERR_TYPE;
                     size_t arg_key_len = 0;
                     if (r.read_key(tmp.key_storage[j], sizeof(tmp.key_storage[j]), &arg_key_len) != ERR_OK) {
                         return r.err();
                     }
                     tmp.args[j].key = tmp.key_storage[j];
                     tmp.args[j].key_len = (uint32_t)arg_key_len;
-                    if (read_arg_value(r, &tmp.args[j].value) != ERR_OK) return r.err();
+                    const int32_t value_rc = read_arg_value(r, &tmp.args[j].value);
+                    if (value_rc != ERR_OK)
+                        return value_rc;
                 }
                 tmp.arg_count = n;
             } else {
@@ -567,11 +614,14 @@ int32_t soulcloud::decode_command_exec(const uint8_t *payload, size_t len, comma
             r.skip_value();
         }
 
-        if (!r.ok()) return r.err();
+        if (!r.ok())
+            return r.err();
     }
 
-    if ((seen & 7u) != 7u) return ERR_MISSING_FIELD;  // id + seq + cmd
-    if (r.finish() != ERR_OK) return r.err();
+    if ((seen & 7u) != 7u)
+        return ERR_MISSING_FIELD; // id + seq + cmd
+    if (r.finish() != ERR_OK)
+        return r.err();
 
     *out = tmp;
     return ERR_OK;
@@ -596,7 +646,8 @@ int32_t soulcloud::encode_command_result(uint8_t *buf, size_t cap, size_t *out_l
     write_args(w, res->args, res->arg_count);
     w.finish_map();
 
-    if (!w.ok()) return w.err();
+    if (!w.ok())
+        return w.err();
     *out_len = w.bytes_written();
     return w.finish();
 }
@@ -620,7 +671,8 @@ int32_t soulcloud::encode_stat(uint8_t *buf, size_t cap, size_t *out_len, const 
     w.write_str(stat->rst);
     w.finish_map();
 
-    if (!w.ok()) return w.err();
+    if (!w.ok())
+        return w.err();
     *out_len = w.bytes_written();
     return w.finish();
 }
@@ -633,102 +685,138 @@ int32_t soulcloud::decode_ota_notice(const uint8_t *payload, size_t len, ota_not
 {
     msgpack_reader r(payload, len);
     const uint32_t map_count = r.expect_map();
-    if (!r.ok()) return r.err();
+    if (!r.ok())
+        return r.err();
 
-    uint32_t seen = 0;  // bit0=release_id bit1=job_id bit2=bin_sha256
-                        // bit3=bin_size bit4=download bit5=version
+    uint32_t seen = 0; // bit0=release_id bit1=job_id bit2=bin_sha256
+                       // bit3=bin_size bit4=download bit5=version
     ota_notice tmp = {};
     tmp.has_version = false;
 
     for (uint32_t i = 0; i < map_count; ++i) {
         char key[24];
         size_t key_len = 0;
-        if (r.read_key(key, sizeof(key), &key_len) != ERR_OK) return r.err();
+        if (r.read_key(key, sizeof(key), &key_len) != ERR_OK)
+            return r.err();
 
         if (key_len == 10 && memcmp(key, "release_id", 10) == 0) {
-            if (seen & 1u) return ERR_DUP_KEY;
+            if (seen & 1u)
+                return ERR_DUP_KEY;
             seen |= 1u;
             uint32_t vlen = 0;
             const char *v = NULL;
-            if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.release_id) - 1) != ERR_OK) return r.err();
+            if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.release_id) - 1) != ERR_OK)
+                return r.err();
             memcpy(tmp.release_id, v, vlen);
             tmp.release_id[vlen] = '\0';
         } else if (key_len == 6 && memcmp(key, "job_id", 6) == 0) {
-            if (seen & 2u) return ERR_DUP_KEY;
+            if (seen & 2u)
+                return ERR_DUP_KEY;
             seen |= 2u;
             uint32_t vlen = 0;
             const char *v = NULL;
-            if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.job_id) - 1) != ERR_OK) return r.err();
+            if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.job_id) - 1) != ERR_OK)
+                return r.err();
             memcpy(tmp.job_id, v, vlen);
             tmp.job_id[vlen] = '\0';
         } else if (key_len == 10 && memcmp(key, "bin_sha256", 10) == 0) {
-            if (seen & 4u) return ERR_DUP_KEY;
+            if (seen & 4u)
+                return ERR_DUP_KEY;
             seen |= 4u;
             uint32_t vlen = 0;
             const char *v = NULL;
-            if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.bin_sha256) - 1) != ERR_OK) return r.err();
+            if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.bin_sha256) - 1) != ERR_OK)
+                return r.err();
             memcpy(tmp.bin_sha256, v, vlen);
             tmp.bin_sha256[vlen] = '\0';
         } else if (key_len == 8 && memcmp(key, "bin_size", 8) == 0) {
-            if (seen & 8u) return ERR_DUP_KEY;
+            if (seen & 8u)
+                return ERR_DUP_KEY;
             seen |= 8u;
             const uint64_t v = r.expect_u64();
-            if (v > UINT32_MAX) return ERR_OVERFLOW;
+            if (v > UINT32_MAX)
+                return ERR_OVERFLOW;
             tmp.bin_size = (uint32_t)v;
         } else if (key_len == 8 && memcmp(key, "download", 8) == 0) {
-            if (seen & 16u) return ERR_DUP_KEY;
+            if (seen & 16u)
+                return ERR_DUP_KEY;
             seen |= 16u;
-            uint32_t dl_seen = 0;  // bit0=url bit1=token bit2=expires_at
+            uint32_t dl_seen = 0; // bit0=url bit1=token bit2=expires_at
             const uint32_t dl_count = r.expect_map();
-            if (!r.ok()) return r.err();
+            if (!r.ok())
+                return r.err();
             for (uint32_t j = 0; j < dl_count; ++j) {
                 char dl_key[24];
                 size_t dl_key_len = 0;
-                if (r.read_key(dl_key, sizeof(dl_key), &dl_key_len) != ERR_OK) return r.err();
+                if (r.read_key(dl_key, sizeof(dl_key), &dl_key_len) != ERR_OK)
+                    return r.err();
                 uint32_t vlen = 0;
                 const char *v = NULL;
                 if (dl_key_len == 3 && memcmp(dl_key, "url", 3) == 0) {
-                    if (dl_seen & 1u) return ERR_DUP_KEY;
+                    if (dl_seen & 1u)
+                        return ERR_DUP_KEY;
                     dl_seen |= 1u;
-                    if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.download_url) - 1) != ERR_OK) return r.err();
+                    if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.download_url) - 1) != ERR_OK)
+                        return r.err();
                     memcpy(tmp.download_url, v, vlen);
                     tmp.download_url[vlen] = '\0';
                 } else if (dl_key_len == 5 && memcmp(dl_key, "token", 5) == 0) {
-                    if (dl_seen & 2u) return ERR_DUP_KEY;
+                    if (dl_seen & 2u)
+                        return ERR_DUP_KEY;
                     dl_seen |= 2u;
-                    if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.download_token) - 1) != ERR_OK) return r.err();
+                    if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.download_token) - 1) != ERR_OK)
+                        return r.err();
                     memcpy(tmp.download_token, v, vlen);
                     tmp.download_token[vlen] = '\0';
                 } else if (dl_key_len == 10 && memcmp(dl_key, "expires_at", 10) == 0) {
-                    if (dl_seen & 4u) return ERR_DUP_KEY;
+                    if (dl_seen & 4u)
+                        return ERR_DUP_KEY;
                     dl_seen |= 4u;
-                    if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.download_expires_at) - 1) != ERR_OK) return r.err();
+                    if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.download_expires_at) - 1) != ERR_OK)
+                        return r.err();
                     memcpy(tmp.download_expires_at, v, vlen);
                     tmp.download_expires_at[vlen] = '\0';
                 } else {
-                    r.skip_value();  // unknown download field
+                    r.skip_value(); // unknown download field
                 }
-                if (!r.ok()) return r.err();
+                if (!r.ok())
+                    return r.err();
             }
-            if ((dl_seen & 3u) != 3u) return ERR_MISSING_FIELD;  // url + token
+            if ((dl_seen & 3u) != 3u)
+                return ERR_MISSING_FIELD; // url + token
         } else if (key_len == 7 && memcmp(key, "version", 7) == 0) {
-            if (seen & 32u) return ERR_DUP_KEY;
+            if (seen & 32u)
+                return ERR_DUP_KEY;
             seen |= 32u;
             uint32_t vlen = 0;
             const char *v = NULL;
-            if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.version) - 1) != ERR_OK) return r.err();
+            if (r.read_str(&v, &vlen, (uint32_t)sizeof(tmp.version) - 1) != ERR_OK)
+                return r.err();
             memcpy(tmp.version, v, vlen);
             tmp.version[vlen] = '\0';
             tmp.has_version = true;
         } else {
-            r.skip_value();  // unknown top-level field
+            r.skip_value(); // unknown top-level field
         }
 
-        if (!r.ok()) return r.err();
+        if (!r.ok())
+            return r.err();
     }
 
-    if ((seen & 31u) != 31u) return ERR_MISSING_FIELD;  // all but version
-    if (r.finish() != ERR_OK) return r.err();
+    if ((seen & 31u) != 31u)
+        return ERR_MISSING_FIELD; // all but version
+    if (tmp.release_id[0] == '\0' || tmp.job_id[0] == '\0' || tmp.bin_size == 0 || tmp.download_url[0] == '\0' ||
+        tmp.download_token[0] == '\0' || strlen(tmp.bin_sha256) != 64u) {
+        return ERR_FIELD_LEN;
+    }
+    for (size_t i = 0; i < 64u; ++i) {
+        const char c = tmp.bin_sha256[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return ERR_TYPE;
+        }
+    }
+    if (r.finish() != ERR_OK)
+        return r.err();
 
     *out = tmp;
     return ERR_OK;
@@ -758,7 +846,8 @@ int32_t soulcloud::encode_ota_result(uint8_t *buf, size_t cap, size_t *out_len, 
     }
     w.finish_map();
 
-    if (!w.ok()) return w.err();
+    if (!w.ok())
+        return w.err();
     *out_len = w.bytes_written();
     return w.finish();
 }
@@ -766,8 +855,7 @@ int32_t soulcloud::encode_ota_result(uint8_t *buf, size_t cap, size_t *out_len, 
 // log uplink container
 // ------------------------------------------------------------------ //
 
-int32_t soulcloud::encode_log_container(uint8_t *buf, size_t cap, size_t *out_len,
-                                        const uint8_t *const *pkts, const size_t *lens,
+int32_t soulcloud::encode_log_container(uint8_t *buf, size_t cap, size_t *out_len, const uint8_t *const *pkts, const size_t *lens,
                                         uint32_t n)
 {
     if (buf == nullptr || out_len == nullptr || pkts == nullptr || lens == nullptr) {
@@ -788,7 +876,7 @@ int32_t soulcloud::encode_log_container(uint8_t *buf, size_t cap, size_t *out_le
         }
     }
 
-    buf[0] = 0x01;  // container type byte (outside the msgpack payload)
+    buf[0] = 0x01; // container type byte (outside the msgpack payload)
     msgpack_writer w(buf + 1, cap - 1);
     w.start_array(n);
     for (uint32_t i = 0; i < n; ++i) {
@@ -796,7 +884,7 @@ int32_t soulcloud::encode_log_container(uint8_t *buf, size_t cap, size_t *out_le
     }
     w.finish_array();
     if (w.err() != ERR_OK) {
-        return w.err();  // ERR_OVERFLOW (cap too small)
+        return w.err(); // ERR_OVERFLOW (cap too small)
     }
     *out_len = 1 + w.bytes_written();
     return ERR_OK;

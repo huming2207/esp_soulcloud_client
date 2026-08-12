@@ -129,6 +129,8 @@ menu "Soulcloud client"
             enqueues with a zero-tick wait, so a full buffer simply drops
             the packet (logs are lossy telemetry). Overridable at runtime
             via the "rb_size" NVS key (setConfig).
+            NOSPLIT reserves internal item metadata and must still admit
+            one 4096-byte packet; init rejects smaller effective capacities.
 
     choice SOULCLOUD_LOG_RB_MEM
         prompt "Log ring buffer memory"
@@ -197,8 +199,9 @@ menu "Soulcloud client"
             the core dispatch task. A burst of messages is drained in
             order; when full, the callback waits up to 100 ms then drops.
             NOSPLIT stores items whole and the largest storable item is
-            roughly half the buffer: values below 2 x (4 + INBOUND_MAX)
-            make init fail with ESP_ERR_INVALID_ARG.
+            roughly half the buffer minus its internal item header. init
+            queries the actual limit and fails with ESP_ERR_INVALID_ARG if
+            one (4 + INBOUND_MAX)-byte record cannot fit.
             (backpressure). Allocated from PSRAM when available.
 
 endmenu

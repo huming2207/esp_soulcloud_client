@@ -19,14 +19,14 @@ using namespace soulcloud;
 
 static int g_fail = 0;
 
-#define CHECK(cond, msg)                                            \
-    do {                                                            \
-        if (cond) {                                                 \
-            printf("  ok: %s\n", msg);                              \
-        } else {                                                    \
-            printf("  FAIL: %s (line %d)\n", msg, __LINE__);        \
-            g_fail++;                                               \
-        }                                                           \
+#define CHECK(cond, msg)                                                                                                         \
+    do {                                                                                                                         \
+        if (cond) {                                                                                                              \
+            printf("  ok: %s\n", msg);                                                                                           \
+        } else {                                                                                                                 \
+            printf("  FAIL: %s (line %d)\n", msg, __LINE__);                                                                     \
+            g_fail++;                                                                                                            \
+        }                                                                                                                        \
     } while (0)
 
 static bool load_file(const char *path, uint8_t *buf, size_t cap, size_t *out_len)
@@ -135,8 +135,7 @@ static void test_decode_command_id()
         len = w.bytes_written();
         CHECK(w.finish() == ERR_OK, "write wrong-typed-seq payload");
         seq = 99;
-        CHECK(decode_command_id(buf, len, id, &seq) == ERR_OK,
-              "wrong-typed seq skipped, id still extracted");
+        CHECK(decode_command_id(buf, len, id, &seq) == ERR_OK, "wrong-typed seq skipped, id still extracted");
         CHECK(memcmp(id, EXPECTED_ID, 16) == 0, "id bytes match");
         CHECK(seq == 99, "seq untouched by the wrong-typed value");
     }
@@ -261,7 +260,8 @@ static void test_encode_stat()
     CHECK(rd.read_bin(&p, &pl, 32) == ERR_OK && pl == 32, "fw bin len");
     bool fw_ok = true;
     for (uint32_t i = 0; i < 32; ++i) {
-        if (p[i] != 0xab) fw_ok = false;
+        if (p[i] != 0xab)
+            fw_ok = false;
     }
     CHECK(fw_ok, "fw bytes");
     CHECK(rd.read_key(key, sizeof(key), &key_len) == ERR_OK && strcmp(key, "up") == 0, "field up");
@@ -399,7 +399,7 @@ static void test_negative_paths()
         w.finish_map();
         len = w.bytes_written();
         w.finish();
-        buf[len++] = 0x00;  // stray nil byte
+        buf[len++] = 0x00; // stray nil byte
         command_exec ce;
         CHECK(decode_command_exec(buf, len, &ce) == ERR_BAD_MSG, "trailing bytes rejected");
     }
@@ -441,6 +441,36 @@ static void test_negative_paths()
         w.finish();
         command_exec ce;
         CHECK(decode_command_exec(buf, len, &ce) == ERR_TYPE, "bad args type rejected");
+    }
+
+    // An argument value may only be a scalar/string/bin. A nested map used
+    // to make read_arg_value() return ERR_TYPE while the caller accidentally
+    // returned the reader's still-OK status, exposing an uninitialised
+    // command_exec to the dispatcher.
+    {
+        msgpack_writer w(buf, sizeof(buf));
+        w.start_map(4);
+        w.write_str("id");
+        w.write_bin(EXPECTED_ID, 16);
+        w.write_str("seq");
+        w.write_uint(1);
+        w.write_str("cmd");
+        w.write_str("echo");
+        w.write_str("args");
+        w.start_array(1);
+        w.start_map(1);
+        w.write_str("nested");
+        w.start_map(1);
+        w.write_str("x");
+        w.write_uint(1);
+        w.finish_map();
+        w.finish_map();
+        w.finish_array();
+        w.finish_map();
+        len = w.bytes_written();
+        w.finish();
+        command_exec ce = {};
+        CHECK(decode_command_exec(buf, len, &ce) == ERR_TYPE, "nested argument value rejected");
     }
 
     // not a map at all
@@ -507,6 +537,34 @@ static void test_negative_paths()
         CHECK(decode_ota_notice(buf, len, &n) == ERR_OK, "ota notice w/ unknown field ok");
         CHECK(!n.has_version, "version absent");
     }
+
+    // The verifier consumes exactly 64 SHA-256 nibbles. Reject malformed
+    // metadata at the protocol boundary instead of treating missing or
+    // non-hex characters as zero.
+    {
+        msgpack_writer w(buf, sizeof(buf));
+        w.start_map(5);
+        w.write_str("release_id");
+        w.write_str("11111111-2222-3333-4444-555555555555");
+        w.write_str("job_id");
+        w.write_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        w.write_str("bin_sha256");
+        w.write_str("not-a-sha");
+        w.write_str("bin_size");
+        w.write_uint(100);
+        w.write_str("download");
+        w.start_map(2);
+        w.write_str("url");
+        w.write_str("/v1/firmware-releases/x/bin");
+        w.write_str("token");
+        w.write_str("tok");
+        w.finish_map();
+        w.finish_map();
+        len = w.bytes_written();
+        w.finish();
+        ota_notice n = {};
+        CHECK(decode_ota_notice(buf, len, &n) == ERR_FIELD_LEN, "short OTA sha rejected");
+    }
 }
 
 static void test_encode_log_container()
@@ -519,33 +577,25 @@ static void test_encode_log_container()
     // A (20 B), B (24 B), C (26 B) -> container:
     //   01 93 c4 14 <A> c4 18 <B> c4 1a <C>
     const uint8_t A[20] = {
-        0x9a, 0x03, 0x01, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x10,
-        0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00,
+        0x9a, 0x03, 0x01, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00,
     };
     const uint8_t B[24] = {
-        0x9a, 0x03, 0x02, 0x00, 0x65, 0x00, 0x00, 0x00, 0x00, 0x10,
-        0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x06, 0x00, 0x01, 0x01,
-        0x2a, 0x00, 0x00, 0x00,
+        0x9a, 0x03, 0x02, 0x00, 0x65, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+        0x00, 0x20, 0x00, 0x00, 0x06, 0x00, 0x01, 0x01, 0x2a, 0x00, 0x00, 0x00,
     };
     const uint8_t C[26] = {
-        0x9a, 0x03, 0x03, 0x00, 0x66, 0x00, 0x00, 0x00, 0x00, 0x10,
-        0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x08, 0x00, 0x01, 0x04,
-        0x02, 0x00, 0x00, 0x00, 0x6f, 0x6b,
+        0x9a, 0x03, 0x03, 0x00, 0x66, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+        0x20, 0x00, 0x00, 0x08, 0x00, 0x01, 0x04, 0x02, 0x00, 0x00, 0x00, 0x6f, 0x6b,
     };
     const uint8_t *pkts[3] = {A, B, C};
     const size_t lens[3] = {sizeof(A), sizeof(B), sizeof(C)};
-    CHECK(encode_log_container(buf, sizeof(buf), &len, pkts, lens, 3) == ERR_OK,
-          "encode doc example");
+    CHECK(encode_log_container(buf, sizeof(buf), &len, pkts, lens, 3) == ERR_OK, "encode doc example");
     CHECK(len == 78, "container length == 78");
     const uint8_t expect[78] = {
-        0x01, 0x93,
-        0xc4, 0x14, 0x9a, 0x03, 0x01, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x10,
-        0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00,
-        0xc4, 0x18, 0x9a, 0x03, 0x02, 0x00, 0x65, 0x00, 0x00, 0x00, 0x00, 0x10,
-        0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x06, 0x00, 0x01, 0x01, 0x2a, 0x00, 0x00, 0x00,
-        0xc4, 0x1a, 0x9a, 0x03, 0x03, 0x00, 0x66, 0x00, 0x00, 0x00, 0x00, 0x10,
-        0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x08, 0x00, 0x01, 0x04, 0x02, 0x00, 0x00, 0x00,
-        0x6f, 0x6b,
+        0x01, 0x93, 0xc4, 0x14, 0x9a, 0x03, 0x01, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00,
+        0x02, 0x00, 0x01, 0x00, 0xc4, 0x18, 0x9a, 0x03, 0x02, 0x00, 0x65, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20,
+        0x00, 0x00, 0x06, 0x00, 0x01, 0x01, 0x2a, 0x00, 0x00, 0x00, 0xc4, 0x1a, 0x9a, 0x03, 0x03, 0x00, 0x66, 0x00, 0x00, 0x00,
+        0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x08, 0x00, 0x01, 0x04, 0x02, 0x00, 0x00, 0x00, 0x6f, 0x6b,
     };
     CHECK(memcmp(buf, expect, sizeof(expect)) == 0, "container bytes match doc example");
 
@@ -555,9 +605,11 @@ static void test_encode_log_container()
         memcpy(tiny, A, sizeof(A));
         uint8_t *ps[16];
         size_t ls[16];
-        for (int i = 0; i < 16; ++i) { ps[i] = tiny; ls[i] = sizeof(tiny); }
-        CHECK(encode_log_container(buf, sizeof(buf), &len, ps, ls, 16) == ERR_OK,
-              "encode 16 elements");
+        for (int i = 0; i < 16; ++i) {
+            ps[i] = tiny;
+            ls[i] = sizeof(tiny);
+        }
+        CHECK(encode_log_container(buf, sizeof(buf), &len, ps, ls, 16) == ERR_OK, "encode 16 elements");
         CHECK(buf[1] == 0xdc && buf[2] == 0x00 && buf[3] == 0x10, "array16 header");
         CHECK(buf[4] == 0xc4, "first element is bin8");
     }
@@ -565,40 +617,34 @@ static void test_encode_log_container()
     // element > 255 bytes -> bin16 header
     {
         uint8_t big[300];
-        memset(big, 0x9a, sizeof(big));  // magic byte at [0] ok
+        memset(big, 0x9a, sizeof(big)); // magic byte at [0] ok
         const uint8_t *ps[1] = {big};
         const size_t ls[1] = {sizeof(big)};
-        CHECK(encode_log_container(buf, sizeof(buf), &len, ps, ls, 1) == ERR_OK,
-              "encode big element");
-        CHECK(buf[1] == 0x91 && buf[2] == 0xc5 && buf[3] == 0x01 && buf[4] == 0x2c,
-              "bin16 header 0x012c");
-        CHECK(len == 1 + 1 + 3 + sizeof(big), "container length");  // type + fixarray + bin16 + payload
+        CHECK(encode_log_container(buf, sizeof(buf), &len, ps, ls, 1) == ERR_OK, "encode big element");
+        CHECK(buf[1] == 0x91 && buf[2] == 0xc5 && buf[3] == 0x01 && buf[4] == 0x2c, "bin16 header 0x012c");
+        CHECK(len == 1 + 1 + 3 + sizeof(big), "container length"); // type + fixarray + bin16 + payload
     }
 
     // empty element list
-    CHECK(encode_log_container(buf, sizeof(buf), &len, pkts, lens, 0) == ERR_OVERFLOW,
-          "zero elements rejected");
+    CHECK(encode_log_container(buf, sizeof(buf), &len, pkts, lens, 0) == ERR_OVERFLOW, "zero elements rejected");
 
     // element without on9log magic
     {
         uint8_t bad[4] = {0x00, 0x01, 0x02, 0x03};
         const uint8_t *ps[1] = {bad};
         const size_t ls[1] = {sizeof(bad)};
-        CHECK(encode_log_container(buf, sizeof(buf), &len, ps, ls, 1) == ERR_BAD_MSG,
-              "bad magic rejected");
+        CHECK(encode_log_container(buf, sizeof(buf), &len, ps, ls, 1) == ERR_BAD_MSG, "bad magic rejected");
     }
 
     // zero-length element
     {
         const uint8_t *ps[1] = {A};
         const size_t ls[1] = {0};
-        CHECK(encode_log_container(buf, sizeof(buf), &len, ps, ls, 1) == ERR_BAD_MSG,
-              "empty element rejected");
+        CHECK(encode_log_container(buf, sizeof(buf), &len, ps, ls, 1) == ERR_BAD_MSG, "empty element rejected");
     }
 
     // capacity too small
-    CHECK(encode_log_container(buf, 8, &len, pkts, lens, 3) == ERR_OVERFLOW,
-          "cap too small rejected");
+    CHECK(encode_log_container(buf, 8, &len, pkts, lens, 3) == ERR_OVERFLOW, "cap too small rejected");
 }
 
 int main(int argc, char **argv)

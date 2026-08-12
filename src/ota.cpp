@@ -10,6 +10,7 @@
 
 #include <sdkconfig.h>
 
+#include <climits>
 #include <cstdio>
 #include <cstring>
 
@@ -18,6 +19,7 @@
 #include <esp_log.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <esp_timer.h>
 #include <nvs.h>
 #ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include <esp_crt_bundle.h>
@@ -37,6 +39,16 @@ static int hex_val(char c)
     if (c >= 'A' && c <= 'F')
         return c - 'A' + 10;
     return 0;
+}
+
+static inline int remaining_timeout_ms(uint64_t deadline_us)
+{
+    const uint64_t now = (uint64_t)esp_timer_get_time();
+    if (now >= deadline_us) {
+        return 0;
+    }
+    const uint64_t remaining_ms = (deadline_us - now + 999u) / 1000u;
+    return remaining_ms > (uint64_t)INT_MAX ? INT_MAX : (int)remaining_ms;
 }
 
 esp_err_t soulcloud::ota_executor::init(const config *cfg, mqtt_bridge *bridge)
@@ -129,16 +141,22 @@ bool soulcloud::ota_executor::last_ota_matches(const char *release_id) const
     return err == ESP_OK && strcmp(last, release_id) == 0;
 }
 
-void soulcloud::ota_executor::store_pending_ota(const char *release_id)
+esp_err_t soulcloud::ota_executor::store_pending_ota(const char *release_id, uint32_t partition_address)
 {
     nvs_handle_t h = 0;
-    if (nvs_open("soulcloud", NVS_READWRITE, &h) != ESP_OK) {
-        return;
+    esp_err_t err = nvs_open("soulcloud", NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
     }
-    if (nvs_set_str(h, NVS_KEY_PENDING_REL, release_id) == ESP_OK) {
-        nvs_commit(h);
+    err = nvs_set_str(h, NVS_KEY_PENDING_REL, release_id);
+    if (err == ESP_OK) {
+        err = nvs_set_u32(h, NVS_KEY_PENDING_ADDR, partition_address);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
     }
     nvs_close(h);
+    return err;
 }
 
 void soulcloud::ota_executor::finalize_pending_ota()
@@ -153,6 +171,14 @@ void soulcloud::ota_executor::finalize_pending_ota()
         nvs_close(h);
         return; // nothing pending (also the common case)
     }
+    uint32_t pending_addr = 0;
+    const esp_err_t addr_err = nvs_get_u32(h, NVS_KEY_PENDING_ADDR, &pending_addr);
+    const bool have_pending_addr = addr_err == ESP_OK;
+    if (addr_err != ESP_OK && addr_err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "read pending OTA partition failed: %s", esp_err_to_name(addr_err));
+        nvs_close(h);
+        return;
+    }
     // First boot after an OTA: only the freshly flashed image is allowed
     // to promote the pending release. With rollback enabled the bootloader
     // marks it PENDING_VERIFY; any other state means we booted an image
@@ -165,30 +191,62 @@ void soulcloud::ota_executor::finalize_pending_ota()
     if (running != nullptr) {
         esp_ota_get_state_partition(running, &state);
     }
+    // New records include the exact target partition. This distinguishes a
+    // successful validation retry (same partition, already VALID) from a
+    // rollback to the old image (different partition). Records written by
+    // older component versions have no address and keep the legacy
+    // PENDING_VERIFY-only handling below.
+    if (have_pending_addr && (running == nullptr || running->address != pending_addr)) {
+        ESP_LOGW(TAG, "running partition does not match pending release %s; dropping it", pending_rel);
+        nvs_erase_key(h, NVS_KEY_PENDING_REL);
+        nvs_erase_key(h, NVS_KEY_PENDING_ADDR);
+        nvs_commit(h);
+        nvs_close(h);
+        return;
+    }
 #if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
-    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+    if ((!have_pending_addr && state != ESP_OTA_IMG_PENDING_VERIFY) ||
+        (have_pending_addr && state != ESP_OTA_IMG_PENDING_VERIFY && state != ESP_OTA_IMG_VALID)) {
         ESP_LOGW(TAG,
                  "booted image is not pending-verify (state %d); "
                  "dropping pending release %s",
                  (int)state, pending_rel);
         nvs_erase_key(h, NVS_KEY_PENDING_REL);
+        nvs_erase_key(h, NVS_KEY_PENDING_ADDR);
         nvs_commit(h);
         nvs_close(h);
         return;
     }
-    if (esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
-        ESP_LOGW(TAG, "mark app valid failed; keeping release pending");
-        nvs_close(h);
-        return; // retried on the next connect
+    if (state == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
+            ESP_LOGW(TAG, "mark app valid failed; keeping release pending");
+            nvs_close(h);
+            return; // retried on the next connect
+        }
     }
 #else
     (void)state; // no rollback mechanism: the pending image is the running one
 #endif
-    // Promote: ota_rel = pending, erase pending.
-    nvs_set_str(h, NVS_KEY_LAST_REL, pending_rel);
-    nvs_erase_key(h, NVS_KEY_PENDING_REL);
-    nvs_commit(h);
+    // Promote atomically. If persistence fails, keep the pending keys so a
+    // same-partition VALID boot can retry instead of redownloading the image.
+    esp_err_t err = nvs_set_str(h, NVS_KEY_LAST_REL, pending_rel);
+    if (err == ESP_OK) {
+        err = nvs_erase_key(h, NVS_KEY_PENDING_REL);
+    }
+    if (err == ESP_OK) {
+        err = nvs_erase_key(h, NVS_KEY_PENDING_ADDR);
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            err = ESP_OK; // legacy record written before partition tracking
+        }
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
     nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "promote pending OTA failed: %s", esp_err_to_name(err));
+        return;
+    }
     ESP_LOGI(TAG, "release %s validated on first boot", pending_rel);
 }
 
@@ -267,6 +325,11 @@ void soulcloud::ota_executor::report_state(const char *state, int32_t code, cons
 bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_out, const esp_partition_t **partition_out,
                                                   size_t *total_out, ota_fail *fail)
 {
+    // Enforce one wall-clock budget for the entire request. ESP HTTP's
+    // timeout is an individual blocking-I/O timeout; without reducing it
+    // to the remaining budget, a peer that keeps making slow progress can
+    // extend an OTA indefinitely.
+    const uint64_t deadline_us = (uint64_t)esp_timer_get_time() + (uint64_t)_cfg->ota_timeout_s * 1000000ull;
     char url[512] = {};
     snprintf(url, sizeof(url), "%s%s", _cfg->api_base_url, pending.download_url);
 
@@ -291,6 +354,12 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     snprintf(auth, sizeof(auth), "Bearer %s", pending.download_token);
     esp_http_client_set_header(http, "Authorization", auth);
 
+    int timeout_ms = remaining_timeout_ms(deadline_us);
+    if (timeout_ms == 0 || esp_http_client_set_timeout_ms(http, timeout_ms) != ESP_OK) {
+        esp_http_client_cleanup(http);
+        *fail = {-1, "download timed out"};
+        return false;
+    }
     if (esp_http_client_open(http, 0) != ESP_OK) {
         esp_http_client_cleanup(http);
         *fail = {-1, "download failed"};
@@ -298,7 +367,13 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     }
     // fetch_headers returns content-length (or 0 if chunked), NOT the HTTP
     // status code; read the status separately before checking it.
-    esp_http_client_fetch_headers(http);
+    timeout_ms = remaining_timeout_ms(deadline_us);
+    if (timeout_ms == 0 || esp_http_client_set_timeout_ms(http, timeout_ms) != ESP_OK ||
+        esp_http_client_fetch_headers(http) < 0) {
+        esp_http_client_cleanup(http);
+        *fail = {-1, "download timed out"};
+        return false;
+    }
     const int status = esp_http_client_get_status_code(http);
     if (status != HttpStatus_Ok) {
         ESP_LOGE(TAG, "download status %d", status);
@@ -336,6 +411,17 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     bool stream_ok = true;
     uint32_t chunks_since_delay = 0;
     for (;;) {
+        if (exit_requested.load(std::memory_order_acquire)) {
+            *fail = {-5, "OTA cancelled"};
+            stream_ok = false;
+            break;
+        }
+        timeout_ms = remaining_timeout_ms(deadline_us);
+        if (timeout_ms == 0 || esp_http_client_set_timeout_ms(http, timeout_ms) != ESP_OK) {
+            *fail = {-1, "download timed out"};
+            stream_ok = false;
+            break;
+        }
         const int n = esp_http_client_read(http, (char *)chunk, sizeof(chunk));
         if (n < 0) {
             ESP_LOGE(TAG, "read error %d", n);
@@ -375,7 +461,9 @@ bool soulcloud::ota_executor::download_and_verify(esp_ota_handle_t *ota_handle_o
     if (!stream_ok) {
         esp_ota_abort(ota_handle);
         esp_http_client_cleanup(http);
-        *fail = {-1, "download failed"};
+        if (fail->msg == nullptr) {
+            *fail = {-1, "download failed"};
+        }
         return false;
     }
 
@@ -475,7 +563,16 @@ void soulcloud::ota_executor::run_once()
     // connect): writing the dedupe key before the restart would mark a
     // release as applied even when the bootloader rolls the new image
     // back, and the release could never be re-delivered.
-    store_pending_ota(pending.release_id);
+    err = store_pending_ota(pending.release_id, partition->address);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "store pending OTA failed: %s", esp_err_to_name(err));
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        if (running == nullptr || esp_ota_set_boot_partition(running) != ESP_OK) {
+            ESP_LOGE(TAG, "failed to restore current boot partition");
+        }
+        report_state("failed", -3, "OTA state persist failed");
+        return;
+    }
     report_state("installed", 0, nullptr);
     ESP_LOGI(TAG, "OTA installed; restarting");
 

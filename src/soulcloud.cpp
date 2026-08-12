@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include <esp_app_desc.h>
 #include <esp_log.h>
@@ -499,7 +500,10 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     }
 
     _cfg = *cfg;
-    impl = new client_impl(*this); // sole heap allocation (deinit frees)
+    impl = new (std::nothrow) client_impl(*this); // sole heap allocation (deinit frees)
+    if (impl == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
 
     const mqtt_callbacks cbs = {
         .on_connected = client_impl::mqtt_on_connected,
@@ -529,18 +533,25 @@ esp_err_t soulcloud::soulcloud_client::init(const config *cfg)
     impl->inbound_rb =
         xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_INBOUND_RB_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (impl->inbound_rb == nullptr) {
+        // Keep the reusable component functional on targets/builds without
+        // PSRAM. PSRAM remains preferred so the default 16 KiB queue does
+        // not consume scarce internal SRAM when external RAM is available.
+        impl->inbound_rb = xRingbufferCreateWithCaps(CONFIG_SOULCLOUD_INBOUND_RB_SIZE, RINGBUF_TYPE_NOSPLIT,
+                                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (impl->inbound_rb == nullptr) {
         client_impl::destroy(*this);
         return ESP_ERR_NO_MEM;
     }
-    // NOSPLIT stores items whole; the largest storable item is roughly
-    // half the buffer. Refuse to run with a configuration where a legal
-    // maximum-size record can never be queued (permanent silent drops).
-    if (CONFIG_SOULCLOUD_INBOUND_RB_SIZE < 2 * (sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX)) {
+    // NOSPLIT reserves an item header in addition to our record header.
+    // Query the implementation rather than approximating half the buffer.
+    const size_t inbound_item_max = xRingbufferGetMaxItemSize(impl->inbound_rb);
+    const size_t inbound_item_required = sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX;
+    if (inbound_item_max < inbound_item_required) {
         ESP_LOGE(TAG,
-                 "SOULCLOUD_INBOUND_RB_SIZE %d too small: must be >= %u "
-                 "(NOSPLIT half-buffer limit)",
-                 CONFIG_SOULCLOUD_INBOUND_RB_SIZE,
-                 2u * (unsigned)(sizeof(client_impl::inbound_header) + CONFIG_SOULCLOUD_INBOUND_MAX));
+                 "SOULCLOUD_INBOUND_RB_SIZE %d too small: NOSPLIT max item "
+                 "is %u, need %u",
+                 CONFIG_SOULCLOUD_INBOUND_RB_SIZE, (unsigned)inbound_item_max, (unsigned)inbound_item_required);
         client_impl::destroy(*this);
         return ESP_ERR_INVALID_ARG;
     }

@@ -49,17 +49,19 @@ esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
         _sink_mutex = nullptr;
         return ESP_ERR_NO_MEM;
     }
-    // NOSPLIT stores items whole; the largest storable item is roughly
-    // half the buffer. Refuse to run with a configuration where a legal
-    // maximum-size packet can never be queued (permanent silent drops).
-    if (_cfg->log_rb_size < 2 * PACKET_MAX) {
+    // NOSPLIT also reserves an internal item header, so a simple
+    // `buffer >= 2 * item` check is off by that header. Query the created
+    // buffer's actual limit and reject configurations that can never queue
+    // one legal maximum-size packet.
+    const size_t max_item_size = xRingbufferGetMaxItemSize(log_rb);
+    if (max_item_size < PACKET_MAX) {
         vRingbufferDelete(log_rb);
         log_rb = nullptr;
         _sink_mutex = nullptr;
         ESP_LOGE(TAG,
-                 "log_rb_size %lu too small: must be >= %u "
-                 "(NOSPLIT half-buffer limit, PACKET_MAX=%u)",
-                 (unsigned long)_cfg->log_rb_size, 2u * PACKET_MAX, PACKET_MAX);
+                 "log_rb_size %lu too small: NOSPLIT max item is %u "
+                 "(PACKET_MAX=%u)",
+                 (unsigned long)_cfg->log_rb_size, (unsigned)max_item_size, PACKET_MAX);
         return ESP_ERR_INVALID_ARG;
     }
 

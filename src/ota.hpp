@@ -125,6 +125,7 @@ namespace soulcloud
         static constexpr size_t CHUNK = 4096;
         static constexpr char NVS_KEY_LAST_REL[] = "ota_rel";
         static constexpr char NVS_KEY_PENDING_REL[] = "ota_pend";
+        static constexpr char NVS_KEY_PENDING_ADDR[] = "ota_paddr";
 
         struct ota_fail {
             int32_t code;
@@ -160,7 +161,7 @@ namespace soulcloud
                                  ota_fail *fail);
         void report_state(const char *state, int32_t code, const char *message);
         bool last_ota_matches(const char *release_id) const;
-        void store_pending_ota(const char *release_id);
+        esp_err_t store_pending_ota(const char *release_id, uint32_t partition_address);
 
         static void task_trampoline(void *ctx);
     };
