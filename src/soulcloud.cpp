@@ -449,7 +449,7 @@ public:
             if (!impl->task_exited.load(std::memory_order_acquire)) {
                 core_forced = true;
                 ESP_LOGE(TAG, "core task did not stop within 30 s; force-deleting");
-                vTaskDelete(impl->task);
+                vTaskDeleteWithCaps(impl->task);
                 impl->task = nullptr;
             }
         }
@@ -466,12 +466,12 @@ public:
         impl->bridge.deinit();
 
         if (impl->inbound_rb != nullptr) {
-            vRingbufferDelete(impl->inbound_rb);
+            vRingbufferDeleteWithCaps(impl->inbound_rb);
             impl->inbound_rb = nullptr;
         }
         soulcloud::log_sender::instance().deinit();
         if (impl->task != nullptr && !core_forced) {
-            vTaskDelete(impl->task);
+            vTaskDeleteWithCaps(impl->task);
         }
         impl->task = nullptr;
         delete impl;

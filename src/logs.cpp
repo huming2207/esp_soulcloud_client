@@ -55,7 +55,7 @@ esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
     // one legal maximum-size packet.
     const size_t max_item_size = xRingbufferGetMaxItemSize(log_rb);
     if (max_item_size < PACKET_MAX) {
-        vRingbufferDelete(log_rb);
+        vRingbufferDeleteWithCaps(log_rb);
         log_rb = nullptr;
         _sink_mutex = nullptr;
         ESP_LOGE(TAG,
@@ -76,7 +76,7 @@ esp_err_t soulcloud::log_sender::init(const config *cfg, mqtt_bridge *bridge)
     // callback -> crash on first log packet).
     _sink = sink;
     if (on9log_add_sink(&_sink, this) != ON9LOG_OK) {
-        vRingbufferDelete(log_rb);
+        vRingbufferDeleteWithCaps(log_rb);
         log_rb = nullptr;
         _sink_mutex = nullptr;
         return ESP_FAIL;
@@ -102,7 +102,7 @@ void soulcloud::log_sender::deinit()
         held_item_len = 0;
     }
     if (log_rb != nullptr) {
-        vRingbufferDelete(log_rb);
+        vRingbufferDeleteWithCaps(log_rb);
         log_rb = nullptr;
     }
     _sink_mutex = nullptr;
