@@ -319,7 +319,7 @@ uint64_t soulcloud::log_sender::next_deadline_us() const
 
     uint64_t flush_due = 0;
     if (held_item != nullptr || batch_elems >= _cfg->log_batch_count || batch_elems >= BATCH_MAX_ELEMS ||
-        xRingbufferGetCurFreeSize(log_rb) < _cfg->log_rb_flush_at) {
+        batch_len >= BATCH_MAX_BYTES - 128u || xRingbufferGetCurFreeSize(log_rb) < _cfg->log_rb_flush_at) {
         flush_due = now;
     }
     if (_cfg->log_batch_timeout_ms > 0) {
@@ -397,7 +397,11 @@ bool soulcloud::log_sender::batch_flush_due(uint64_t now) const
     }
     const bool timeout = _cfg->log_batch_timeout_ms > 0 && now - batch_start_us >= (uint64_t)_cfg->log_batch_timeout_ms * 1000ull;
     const bool backpressure = held_item != nullptr || xRingbufferGetCurFreeSize(log_rb) < _cfg->log_rb_flush_at;
-    return timeout || backpressure;
+    // A full batch may have been retained by the rate limiter. Retry it
+    // even with no new packets and with the optional timer disabled.
+    const bool full = batch_elems >= _cfg->log_batch_count || batch_elems >= BATCH_MAX_ELEMS ||
+                      batch_len >= BATCH_MAX_BYTES - 128u;
+    return timeout || backpressure || full;
 }
 
 void soulcloud::log_sender::record_drop()
