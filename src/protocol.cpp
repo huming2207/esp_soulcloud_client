@@ -624,6 +624,11 @@ int32_t soulcloud::decode_command_exec(const uint8_t *payload, size_t len, comma
         return r.err();
 
     *out = tmp;
+    // The value copy retains pointers into tmp; rebind owned keys before
+    // that temporary leaves scope. Values still borrow the input payload.
+    for (uint32_t i = 0; i < out->arg_count; ++i) {
+        out->args[i].key = out->key_storage[i];
+    }
     return ERR_OK;
 }
 

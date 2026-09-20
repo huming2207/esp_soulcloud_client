@@ -78,6 +78,7 @@ static void test_decode_command_exec()
     CHECK(ce.seq == 1, "seq == 1");
     CHECK(ce.cmd_len == 10 && memcmp(ce.cmd, "setLogging", 10) == 0, "cmd == setLogging");
     CHECK(ce.arg_count == 1, "arg_count == 1");
+    CHECK(ce.args[0].key == ce.key_storage[0], "decoded key belongs to output, not decoder stack");
     CHECK(ce.args[0].key_len == 7 && memcmp(ce.args[0].key, "enabled", 7) == 0, "arg key == enabled");
     CHECK(ce.args[0].value.type == cmd_arg_value::TYPE_BOOL && ce.args[0].value.b, "arg value == true");
 
