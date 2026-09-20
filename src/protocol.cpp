@@ -207,9 +207,38 @@ int32_t soulcloud::msgpack_reader::read_bin(const uint8_t **ptr, uint32_t *len, 
     return ret;
 }
 
+// MPack's streaming mpack_discard() recurses without a depth limit.
+// Unknown fields must not be able to exhaust the embedded task stack.
+static void discard_bounded(mpack_reader_t *reader, uint32_t depth)
+{
+    mpack_tag_t tag = mpack_peek_tag(reader);
+    if (mpack_reader_error(reader) != mpack_ok)
+        return;
+    const mpack_type_t type = mpack_tag_type(&tag);
+    if (type != mpack_type_array && type != mpack_type_map) {
+        mpack_discard(reader); // scalar: no recursion
+        return;
+    }
+    if (depth >= MPACK_MAX_DEPTH) {
+        mpack_reader_flag_error(reader, mpack_error_too_big);
+        return;
+    }
+    mpack_read_tag(reader);
+    const uint32_t count = type == mpack_type_map ? mpack_tag_map_count(&tag) : mpack_tag_array_count(&tag);
+    for (uint32_t i = 0; i < count && mpack_reader_error(reader) == mpack_ok; ++i) {
+        discard_bounded(reader, depth + 1);
+        if (type == mpack_type_map)
+            discard_bounded(reader, depth + 1);
+    }
+    if (type == mpack_type_map)
+        mpack_done_map(reader);
+    else
+        mpack_done_array(reader);
+}
+
 void soulcloud::msgpack_reader::skip_value()
 {
-    mpack_discard(&r);
+    discard_bounded(&r, 0);
     if (mpack_reader_error(&r) != mpack_ok)
         fail(ERR_BAD_MSG);
 }

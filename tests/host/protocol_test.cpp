@@ -90,6 +90,22 @@ static void test_decode_command_exec()
     CHECK(ce.arg_count == 0, "arg_count == 0");
 }
 
+static void test_skip_depth_limit()
+{
+    printf("[bounded unknown-field skipping]\n");
+    uint8_t nested[2048];
+    memset(nested, 0x91, sizeof(nested)); // singleton arrays
+    nested[sizeof(nested) - 1] = 0xc0;
+    msgpack_reader deep(nested, sizeof(nested));
+    deep.skip_value();
+    CHECK(!deep.ok(), "deep unknown value rejected without unbounded recursion");
+
+    const uint8_t shallow[] = {0x81, 0xa1, 'k', 0x92, 0xc0, 0x01};
+    msgpack_reader valid(shallow, sizeof(shallow));
+    valid.skip_value();
+    CHECK(valid.finish() == ERR_OK, "ordinary nested unknown value still accepted");
+}
+
 static void test_decode_command_id()
 {
     printf("[decode command id (error-result extraction)]\n");
@@ -659,6 +675,7 @@ int main(int argc, char **argv)
     test_topic_helpers();
     test_decode_command_exec();
     test_decode_command_id();
+    test_skip_depth_limit();
     test_encode_command_result();
     test_encode_stat();
     test_decode_ota_notice();
