@@ -1,0 +1,112 @@
+menu "SoulCloud client"
+
+    config SOULCLOUD_API_URL
+        string "Platform base URL"
+        default "https://iot.example.com"
+        help
+            Base URL of the SoulCloud platform, used to redeem the pairing token
+            (POST /v1/device/enroll). The MQTT URL comes back from enrollment.
+
+    config SOULCLOUD_HEARTBEAT_INTERVAL_SEC
+        int "Heartbeat interval (seconds)"
+        range 10 3600
+        default 60
+
+    menu "Requests"
+        config SOULCLOUD_RPC_QUEUE_LEN
+            int "Pending request slots"
+            range 1 16
+            default 4
+            help
+                Requests from the platform wait here for the request task. A
+                request arriving while every slot is taken is answered "busy".
+
+        config SOULCLOUD_RPC_PAYLOAD_MAX
+            int "Largest request payload (bytes)"
+            range 256 4096
+            default 768
+
+        config SOULCLOUD_RPC_RESULT_MAX
+            int "Largest response (bytes)"
+            range 256 8192
+            default 1536
+
+        config SOULCLOUD_RPC_TASK_STACK
+            int "Request task stack size"
+            default 5120
+
+        config SOULCLOUD_SHELL_MAX_CMDS
+            int "Shell command slots"
+            range 8 64
+            default 32
+    endmenu
+
+    menu "Log uplink"
+        config SOULCLOUD_LOG_BIN
+            bool "Forward on9log binary logs"
+            default y
+
+        config SOULCLOUD_LOG_TEXT
+            bool "Forward ESP_LOG text logs"
+            default y
+
+        config SOULCLOUD_LOG_RINGBUF_SIZE
+            int "Buffer per log kind (bytes)"
+            range 1024 65536
+            default 8192
+            help
+                Logs wait here while offline or between uploads. When it is full
+                new log packets are dropped and counted.
+
+        config SOULCLOUD_LOG_BATCH_SIZE
+            int "Upload batch size (bytes)"
+            range 512 8192
+            default 2048
+
+        config SOULCLOUD_LOG_FLUSH_MS
+            int "Upload interval (ms)"
+            range 100 60000
+            default 1000
+
+        config SOULCLOUD_LOG_TEXT_LINE_MAX
+            int "Longest forwarded text line"
+            range 64 1024
+            default 256
+            help
+                Formatted on the logging task's stack.
+
+        config SOULCLOUD_LOG_QOS1
+            bool "Upload logs with QoS 1"
+            default n
+            help
+                QoS 1 survives a broken connection but esp-mqtt copies every batch
+                into its outbox, one heap allocation per upload. QoS 0 sends
+                straight from the batch buffer.
+
+        config SOULCLOUD_LOG_BUFFERS_IN_PSRAM
+            bool "Keep log buffers in PSRAM"
+            depends on SPIRAM
+            default y
+    endmenu
+
+    menu "OTA"
+        config SOULCLOUD_OTA_TASK_STACK
+            int "OTA task stack size"
+            default 8192
+            help
+                Runs the HTTPS download, including the TLS handshake.
+
+        config SOULCLOUD_OTA_HTTP_BUFFER
+            int "HTTP receive buffer (bytes)"
+            default 4096
+
+        config SOULCLOUD_MARK_APP_VALID
+            bool "Confirm a new image after the first platform connection"
+            default y
+            help
+                With bootloader rollback enabled, an updated image boots as
+                pending. The client marks it valid once it has connected and
+                reported its status; otherwise the next reset rolls back.
+    endmenu
+
+endmenu

@@ -1,0 +1,6 @@
+version: "2.0.0"
+description: "SoulCloud device client: MQTT 5 over WebSocket, logs, remote shell and OTA"
+url: "https://github.com/huming2207/esp_soulcloud_client"
+dependencies:
+  idf: ">=6.0"
+  espressif/mqtt: "^1.1.0"
