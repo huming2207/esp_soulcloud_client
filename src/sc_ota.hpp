@@ -34,7 +34,7 @@ class sc_ota
 public:
     esp_err_t init(sc_mqtt *_mqtt);
 
-    /** Start an update. ESP_ERR_INVALID_STATE while one is running. */
+    /** Start an update. ESP_OK if this update is already running, ESP_ERR_INVALID_STATE for a different one. */
     esp_err_t start(const sc_ota_params &_params);
 
     /** Stop the running update if its task ID is @p task_id. */

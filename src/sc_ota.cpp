@@ -22,7 +22,8 @@ esp_err_t sc_ota::start(const sc_ota_params &_params)
 {
     bool expected = false;
     if (!running.compare_exchange_strong(expected, true)) {
-        return ESP_ERR_INVALID_STATE;
+        // The same update can arrive twice (ota.check answer and ota.start request): not an error.
+        return strcmp(_params.task_id, params.task_id) == 0 ? ESP_OK : ESP_ERR_INVALID_STATE;
     }
 
     params = _params;
